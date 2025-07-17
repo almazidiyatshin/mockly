@@ -1,0 +1,1 @@
+export { useMocks } from "./useMocks";
