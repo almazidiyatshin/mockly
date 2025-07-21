@@ -46,13 +46,16 @@ export const useModel = () => {
 		statusCode: z.number().min(1, "statusCode is required"),
 	});
 
+	const formatJson = (data: string) =>
+		JSON.stringify(JSON.parse(data), null, 2);
+
 	const form = useForm<z.infer<typeof ZFormSchema>>({
 		resolver: zodResolver(ZFormSchema),
 		defaultValues: {
 			name: "",
 			method: data?.method || "",
 			url: data?.url || "",
-			response: data?.responseBody || "",
+			response: data?.responseBody ? formatJson(data.responseBody) : "",
 			headers: [{ key: "", value: "" }],
 			statusCode: 200,
 		},

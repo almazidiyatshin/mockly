@@ -41,8 +41,6 @@ window.addEventListener("message", (event) => {
 						method: event.data.method,
 						responseBody: event.data.responseBody,
 						statusCode: event.data.statusCode,
-						contentType: event.data.contentType,
-						responseType: event.data.responseType,
 						isMocked: event.data.isMocked,
 						mockId: event.data.mockId,
 						timestamp: Date.now(),

@@ -3,7 +3,94 @@ import { notifyMocksUpdated, shouldIgnore } from "./lib/background";
 
 let requestHistory: any[] = [];
 let mocks: any[] = [];
-let detailedRequestHistory: any[] = []; // Новый массив для хранения детальной информации
+let detailedRequestHistory: any[] = [];
+
+let currentDomain: string = "";
+
+const getDomainFromUrl = (url: string): string => {
+	try {
+		const urlObj = new URL(url);
+		return urlObj.hostname;
+	} catch (e) {
+		return "";
+	}
+};
+
+const notifyHistoryUpdated = (newEntry?: any) => {
+	chrome.runtime
+		.sendMessage({
+			type: "HISTORY_UPDATED",
+			payload: {
+				newEntry,
+				fullHistory: detailedRequestHistory,
+			},
+		})
+		.catch(() => {});
+
+	chrome.tabs.query({}, (tabs) => {
+		tabs.forEach((tab) => {
+			if (tab.id) {
+				chrome.tabs
+					.sendMessage(tab.id, {
+						type: "HISTORY_UPDATED",
+						payload: {
+							newEntry,
+							fullHistory: detailedRequestHistory,
+						},
+					})
+					.catch(() => {});
+			}
+		});
+	});
+};
+
+const clearHistory = () => {
+	requestHistory = [];
+	detailedRequestHistory = [];
+
+	chrome.storage.local.set({
+		requestHistory: [],
+		detailedRequestHistory: [],
+	});
+};
+
+const checkAndUpdateDomain = () => {
+	chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+		if (tabs[0] && tabs[0].url) {
+			const newDomain = getDomainFromUrl(tabs[0].url);
+
+			// Если домен изменился, очищаем историю
+			if (currentDomain && currentDomain !== newDomain && newDomain !== "") {
+				clearHistory();
+				notifyHistoryUpdated();
+				console.log(
+					`Domain changed from ${currentDomain} to ${newDomain}, history cleared`,
+				);
+			}
+
+			// Обновляем текущий домен
+			if (newDomain) {
+				currentDomain = newDomain;
+			}
+		}
+	});
+};
+
+chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
+	if (changeInfo.url && tab.active) {
+		checkAndUpdateDomain();
+	}
+});
+
+chrome.tabs.onActivated.addListener(() => {
+	checkAndUpdateDomain();
+});
+
+chrome.windows.onFocusChanged.addListener((windowId) => {
+	if (windowId !== chrome.windows.WINDOW_ID_NONE) {
+		checkAndUpdateDomain();
+	}
+});
 
 chrome.runtime.onStartup.addListener(async () => {
 	const result = await chrome.storage.local.get([
@@ -13,6 +100,7 @@ chrome.runtime.onStartup.addListener(async () => {
 	mocks = result.mocks || [];
 	detailedRequestHistory = result.detailedRequestHistory || [];
 	notifyMocksUpdated(mocks);
+	checkAndUpdateDomain();
 });
 
 chrome.runtime.onInstalled.addListener(async () => {
@@ -23,6 +111,7 @@ chrome.runtime.onInstalled.addListener(async () => {
 	mocks = result.mocks || [];
 	detailedRequestHistory = result.detailedRequestHistory || [];
 	notifyMocksUpdated(mocks);
+	checkAndUpdateDomain();
 });
 
 chrome.action.onClicked.addListener(() => {
@@ -60,22 +149,19 @@ chrome.webRequest.onCompleted.addListener(
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 	switch (message.type) {
 		case "LOG_REQUEST": {
-			// Сохраняем детальную информацию о запросе
 			const detailedEntry = {
 				...message.payload,
-				id: crypto.randomUUID(), // Уникальный ID
+				id: crypto.randomUUID(),
 			};
 
 			detailedRequestHistory.push(detailedEntry);
 
-			// Ограничиваем размер истории
 			if (detailedRequestHistory.length > 100) {
 				detailedRequestHistory.shift();
 			}
 
 			chrome.storage.local.set({ detailedRequestHistory }, () => {
-				// Опционально: можем отправить уведомление о новом запросе
-				// Используем sendResponse вместо нового sendMessage
+				notifyHistoryUpdated(detailedEntry);
 			});
 
 			sendResponse({ success: true });
@@ -118,6 +204,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 					detailedRequestHistory: [],
 				},
 				() => {
+					notifyHistoryUpdated();
 					sendResponse({ success: true });
 				},
 			);
@@ -126,6 +213,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 		case "CLEAR_DETAILED_HISTORY":
 			detailedRequestHistory = [];
 			chrome.storage.local.set({ detailedRequestHistory: [] }, () => {
+				notifyHistoryUpdated();
 				sendResponse({ success: true });
 			});
 			return true;

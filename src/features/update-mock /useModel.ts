@@ -46,13 +46,16 @@ export const useModel = () => {
 		statusCode: z.number().min(1, "statusCode is required"),
 	});
 
+	const formatJson = (data: string) =>
+		JSON.stringify(JSON.parse(data), null, 2);
+
 	const form = useForm<z.infer<typeof ZFormSchema>>({
 		resolver: zodResolver(ZFormSchema),
 		defaultValues: {
 			name: mock.name,
 			method: mock.method,
 			url: mock.url,
-			response: mock.response || "",
+			response: mock.response ? formatJson(mock.response) : "",
 			headers:
 				mock.headers && !!Object.keys(mock.headers).length
 					? Object.entries(mock.headers).map(([key, value]) => ({ key, value }))

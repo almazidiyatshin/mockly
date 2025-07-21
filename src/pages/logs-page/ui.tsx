@@ -1,7 +1,7 @@
 import { Braces } from "lucide-react";
 import { Link } from "react-router-dom";
 import { cn } from "@/shared/lib";
-import { Button, EmptyBlock, PageLayout, Table } from "@/shared/ui";
+import { Button, EmptyBlock, Loader, PageLayout, Table } from "@/shared/ui";
 import {
 	TableBody,
 	TableCell,
@@ -12,7 +12,11 @@ import {
 import { useModel } from "./useModel";
 
 const LogsPage = () => {
-	const { history } = useModel();
+	const { isLoading, history } = useModel();
+
+	if (isLoading) {
+		return <Loader />;
+	}
 
 	return (
 		<PageLayout title="Logs">

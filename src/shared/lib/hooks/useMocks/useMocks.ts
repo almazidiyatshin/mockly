@@ -3,7 +3,7 @@ import type { TMock } from "@/shared/types";
 
 export const useMocks = () => {
 	const [mocks, setMocks] = useState<TMock[]>([]);
-	const [isLoading, setIsLoading] = useState(false);
+	const [isLoading, setIsLoading] = useState(true);
 
 	useEffect(() => {
 		// Получаем начальный список

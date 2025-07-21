@@ -11,7 +11,9 @@
 		"storage",
 		"scripting",
 		"activeTab",
-		"unlimitedStorage"
+		"unlimitedStorage",
+		"tabs",
+		"activeTab"
 	],
 	"host_permissions": ["<all_urls>"],
 	"background": {
