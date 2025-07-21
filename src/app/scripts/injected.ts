@@ -1,4 +1,5 @@
 import {
+	cloneAndReadResponse,
 	findMockForUrl,
 	getStatusText,
 	shouldInterceptRequest,
@@ -41,16 +42,6 @@ import {
 		const mock = findMockForUrl(url, method, mocks);
 
 		if (mock) {
-			window.postMessage(
-				{
-					type: "MOCKLY_REQUEST_INTERCEPTED",
-					url: url,
-					method: method,
-					mockId: mock.id,
-				},
-				"*",
-			);
-
 			const mockHeaders = new Headers();
 			mockHeaders.set("Content-Type", "application/json");
 
@@ -72,6 +63,20 @@ import {
 				headers: mockHeaders,
 			});
 
+			window.postMessage(
+				{
+					type: "MOCKLY_REQUEST_INTERCEPTED",
+					url: url,
+					method: method,
+					mockId: mock.id,
+					responseBody: responseBody,
+					statusCode: mock.statusCode || 200,
+					isMocked: true,
+					timestamp: Date.now(),
+				},
+				"*",
+			);
+
 			const delay = mock.delay || 0;
 			if (delay > 0) {
 				await new Promise((resolve) => setTimeout(resolve, delay));
@@ -80,8 +85,26 @@ import {
 			return Promise.resolve(mockResponse);
 		}
 
-		return originalFetch.apply(this, args);
+		const response = await originalFetch.apply(this, args);
+
+		const responseBody = await cloneAndReadResponse(response);
+
+		window.postMessage(
+			{
+				type: "MOCKLY_REQUEST_COMPLETED",
+				url: url,
+				method: method,
+				responseBody: responseBody,
+				statusCode: response.status,
+				isMocked: false,
+				timestamp: Date.now(),
+			},
+			"*",
+		);
+
+		return response;
 	};
+
 	//@ts-ignore
 	window.XMLHttpRequest = function XMLHttpRequest() {
 		const xhr = new originalXHR();
@@ -90,6 +113,7 @@ import {
 
 		let requestUrl = "";
 		let requestMethod = "GET";
+
 		//@ts-ignore
 		xhr.open = function (method, url, ...args) {
 			//@ts-ignore
@@ -103,16 +127,6 @@ import {
 			const mock = findMockForUrl(requestUrl, requestMethod, mocks);
 
 			if (mock) {
-				window.postMessage(
-					{
-						type: "MOCKLY_REQUEST_INTERCEPTED",
-						url: requestUrl,
-						method: requestMethod,
-						mockId: mock.id,
-					},
-					"*",
-				);
-
 				const delay = mock.delay || 10;
 
 				setTimeout(() => {
@@ -122,6 +136,20 @@ import {
 							: JSON.stringify(mock.response);
 					const status = mock.statusCode || 200;
 					const statusText = getStatusText(status);
+
+					window.postMessage(
+						{
+							type: "MOCKLY_REQUEST_INTERCEPTED",
+							url: requestUrl,
+							method: requestMethod,
+							mockId: mock.id,
+							responseBody: responseBody,
+							statusCode: status,
+							isMocked: true,
+							timestamp: Date.now(),
+						},
+						"*",
+					);
 
 					Object.defineProperty(xhr, "readyState", {
 						value: 4,
@@ -184,6 +212,56 @@ import {
 
 				return;
 			}
+
+			const originalOnReadyStateChange = xhr.onreadystatechange;
+
+			xhr.onreadystatechange = function () {
+				if (xhr.readyState === 4) {
+					let responseBody = "";
+					try {
+						if (xhr.responseType === "" || xhr.responseType === "text") {
+							responseBody = xhr.responseText;
+						} else if (xhr.responseType === "json") {
+							responseBody = JSON.stringify(xhr.response);
+						} else if (xhr.responseType === "document") {
+							responseBody = xhr.response?.documentElement?.outerHTML || "";
+						} else if (xhr.responseType === "arraybuffer") {
+							try {
+								const decoder = new TextDecoder();
+								responseBody = decoder.decode(xhr.response);
+							} catch {
+								responseBody = "[Binary data]";
+							}
+						} else if (xhr.responseType === "blob") {
+							responseBody = "[Blob data]";
+						} else {
+							responseBody = String(xhr.response);
+						}
+					} catch (e) {
+						responseBody = "";
+					}
+
+					// Отправляем сообщение с телом ответа
+					window.postMessage(
+						{
+							type: "MOCKLY_REQUEST_COMPLETED",
+							url: requestUrl,
+							method: requestMethod,
+							responseBody: responseBody,
+							statusCode: xhr.status,
+							isMocked: false,
+							timestamp: Date.now(),
+						},
+						"*",
+					);
+				}
+
+				if (originalOnReadyStateChange) {
+					//@ts-ignore
+					originalOnReadyStateChange.apply(this, arguments);
+				}
+			};
+
 			//@ts-ignore
 			return originalSend.apply(this, arguments);
 		};

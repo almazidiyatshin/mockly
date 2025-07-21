@@ -20,7 +20,7 @@ const getPathFromUrl = (inputUrl: string) => {
 	try {
 		const urlObj = new URL(inputUrl, window.location.origin);
 		return urlObj.pathname + urlObj.search;
-	} catch (e) {
+	} catch {
 		return inputUrl;
 	}
 };
@@ -59,7 +59,7 @@ export const findMockForUrl = (url: string, method = "GET", mocks: any[]) => {
 			try {
 				const regex = new RegExp(mock.urlPattern);
 				regexMatch = regex.test(normalizedUrl);
-			} catch (e) {
+			} catch {
 				console.warn("Invalid regex pattern:", mock.urlPattern);
 			}
 		}
@@ -112,4 +112,23 @@ export const getStatusText = (status: number) => {
 		503: "Service Unavailable",
 	};
 	return statusTexts[status] || "Unknown";
+};
+
+export const cloneAndReadResponse = async (
+	response: Response,
+): Promise<string> => {
+	const contentType = response.headers.get("content-type");
+	const clonedResponse = response.clone();
+
+	try {
+		if (contentType && contentType.includes("application/json")) {
+			const body = await clonedResponse.json();
+			return JSON.stringify(body);
+		} else {
+			const body = await clonedResponse.text();
+			return body;
+		}
+	} catch {
+		return "";
+	}
 };

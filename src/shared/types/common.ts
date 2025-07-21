@@ -1,12 +1,11 @@
 export type TLog = {
-	requestId: number;
+	id: number;
+	isMocked: boolean;
 	method: string;
 	statusCode: number;
 	timeStamp: number;
 	url: string;
-	enabled: boolean;
-	delay: number;
-	body: string;
+	responseBody: string;
 };
 
 export type TMock = {

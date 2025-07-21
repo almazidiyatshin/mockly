@@ -3,16 +3,25 @@ import { notifyMocksUpdated, shouldIgnore } from "./lib/background";
 
 let requestHistory: any[] = [];
 let mocks: any[] = [];
+let detailedRequestHistory: any[] = []; // Новый массив для хранения детальной информации
 
 chrome.runtime.onStartup.addListener(async () => {
-	const result = await chrome.storage.local.get("mocks");
+	const result = await chrome.storage.local.get([
+		"mocks",
+		"detailedRequestHistory",
+	]);
 	mocks = result.mocks || [];
+	detailedRequestHistory = result.detailedRequestHistory || [];
 	notifyMocksUpdated(mocks);
 });
 
 chrome.runtime.onInstalled.addListener(async () => {
-	const result = await chrome.storage.local.get("mocks");
+	const result = await chrome.storage.local.get([
+		"mocks",
+		"detailedRequestHistory",
+	]);
 	mocks = result.mocks || [];
+	detailedRequestHistory = result.detailedRequestHistory || [];
 	notifyMocksUpdated(mocks);
 });
 
@@ -50,6 +59,35 @@ chrome.webRequest.onCompleted.addListener(
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 	switch (message.type) {
+		case "LOG_REQUEST": {
+			// Сохраняем детальную информацию о запросе
+			const detailedEntry = {
+				...message.payload,
+				id: crypto.randomUUID(), // Уникальный ID
+			};
+
+			detailedRequestHistory.push(detailedEntry);
+
+			// Ограничиваем размер истории
+			if (detailedRequestHistory.length > 100) {
+				detailedRequestHistory.shift();
+			}
+
+			chrome.storage.local.set({ detailedRequestHistory }, () => {
+				// Опционально: можем отправить уведомление о новом запросе
+				// Используем sendResponse вместо нового sendMessage
+			});
+
+			sendResponse({ success: true });
+			return true;
+		}
+
+		case "GET_DETAILED_HISTORY":
+			chrome.storage.local.get("detailedRequestHistory", (result) => {
+				sendResponse(result.detailedRequestHistory || []);
+			});
+			return true;
+
 		case "GET_HISTORY":
 			chrome.storage.local.get("requestHistory", (result) => {
 				sendResponse(result.requestHistory || []);
@@ -73,7 +111,21 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 		case "CLEAR_HISTORY":
 			requestHistory = [];
-			chrome.storage.local.set({ requestHistory: [] }, () => {
+			detailedRequestHistory = [];
+			chrome.storage.local.set(
+				{
+					requestHistory: [],
+					detailedRequestHistory: [],
+				},
+				() => {
+					sendResponse({ success: true });
+				},
+			);
+			return true;
+
+		case "CLEAR_DETAILED_HISTORY":
+			detailedRequestHistory = [];
+			chrome.storage.local.set({ detailedRequestHistory: [] }, () => {
 				sendResponse({ success: true });
 			});
 			return true;

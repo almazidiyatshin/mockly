@@ -52,7 +52,7 @@ export const useModel = () => {
 			name: "",
 			method: data?.method || "",
 			url: data?.url || "",
-			response: data?.body || "",
+			response: data?.responseBody || "",
 			headers: [{ key: "", value: "" }],
 			statusCode: 200,
 		},

@@ -101,8 +101,6 @@ export const useModel = () => {
 			enabled: mock.enabled,
 		};
 
-		console.log({ submitData });
-
 		updateMock(mock.id, submitData).then(() => {
 			form.reset({
 				name: "",

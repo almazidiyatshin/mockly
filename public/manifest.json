@@ -6,7 +6,13 @@
 	"name": "Mockly",
 	"version": "1.0.0",
 	"description": "Intercept and mock HTTP requests",
-	"permissions": ["webRequest", "storage", "scripting", "activeTab"],
+	"permissions": [
+		"webRequest",
+		"storage",
+		"scripting",
+		"activeTab",
+		"unlimitedStorage"
+	],
 	"host_permissions": ["<all_urls>"],
 	"background": {
 		"service_worker": "assets/background.js",

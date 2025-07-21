@@ -12,7 +12,7 @@ import {
 import { useModel } from "./useModel";
 
 const LogsPage = () => {
-	const { history, mocks } = useModel();
+	const { history } = useModel();
 
 	return (
 		<PageLayout title="Logs">
@@ -31,52 +31,29 @@ const LogsPage = () => {
 						{history.map((log) => (
 							<TableRow key={log.statusCode}>
 								<TableCell
-									className={cn(
-										"font-medium",
-										!!mocks.find(
-											(mock) =>
-												mock.url === log.url && mock.method === log.method,
-										) && "text-teal-600",
-									)}
+									className={cn("font-medium", log.isMocked && "text-teal-600")}
 								>
-									{mocks.find(
-										(mock) =>
-											mock.url === log.url && mock.method === log.method,
-									)?.statusCode || log.statusCode}
+									{log.statusCode}
 								</TableCell>
-								<TableCell
-									className={cn(
-										!!mocks.find(
-											(mock) =>
-												mock.url === log.url && mock.method === log.method,
-										) && "text-teal-600",
-									)}
-								>
+								<TableCell className={cn(log.isMocked && "text-teal-600")}>
 									{log.method}
 								</TableCell>
 								<TableCell
 									title={log.url}
 									className={cn(
 										"truncate overflow-hidden whitespace-nowrap max-w-xs",
-										!!mocks.find(
-											(mock) =>
-												mock.url === log.url && mock.method === log.method,
-										) && "text-teal-600",
+										log.isMocked && "text-teal-600",
 									)}
 								>
 									{log.url}
 								</TableCell>
 								<TableCell className="text-">
-									{!!mocks.find(
-										(mock) =>
-											mock.url === log.url && mock.method === log.method,
-									) && <Braces size={20} className="text-teal-600" />}
+									{log.isMocked && (
+										<Braces size={20} className="text-teal-600" />
+									)}
 								</TableCell>
 								<TableCell className="text-right">
-									{mocks.find(
-										(mock) =>
-											mock.url === log.url && mock.method === log.method,
-									) ? (
+									{log.isMocked ? (
 										<Button
 											variant="outline"
 											size="sm"
