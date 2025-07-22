@@ -35,25 +35,40 @@ const LogsPage = () => {
 						{history.map((log) => (
 							<TableRow key={log.statusCode}>
 								<TableCell
-									className={cn("font-medium", log.isMocked && "text-teal-600")}
+									className={cn(
+										"font-medium",
+										log.isMocked &&
+											(log.statusCode < 400 ? "text-teal-600" : "text-red-600"),
+									)}
 								>
 									{log.statusCode}
 								</TableCell>
-								<TableCell className={cn(log.isMocked && "text-teal-600")}>
+								<TableCell
+									className={cn(
+										log.isMocked &&
+											(log.statusCode < 400 ? "text-teal-600" : "text-red-600"),
+									)}
+								>
 									{log.method}
 								</TableCell>
 								<TableCell
 									title={log.url}
 									className={cn(
 										"truncate overflow-hidden whitespace-nowrap max-w-xs",
-										log.isMocked && "text-teal-600",
+										log.isMocked &&
+											(log.statusCode < 400 ? "text-teal-600" : "text-red-600"),
 									)}
 								>
 									{log.url}
 								</TableCell>
 								<TableCell className="text-">
 									{log.isMocked && (
-										<Braces size={20} className="text-teal-600" />
+										<Braces
+											size={20}
+											className={
+												log.statusCode < 400 ? "text-teal-600" : "text-red-600"
+											}
+										/>
 									)}
 								</TableCell>
 								<TableCell className="text-right">

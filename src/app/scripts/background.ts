@@ -1,117 +1,69 @@
 import { allowedTypes } from "./constants/background";
-import { notifyMocksUpdated, shouldIgnore } from "./lib/background";
+import {
+	checkAndUpdateDomain,
+	clearTabHistory,
+	getActiveTabHistory,
+	loadTabHistory,
+	notifyHistoryUpdated,
+	notifyMocksUpdated,
+	shouldIgnore,
+	updateActiveTab,
+} from "./lib/background";
+import { BackgroundState } from "./lib/background-state";
 
-let requestHistory: any[] = [];
-let mocks: any[] = [];
-let detailedRequestHistory: any[] = [];
+const state = BackgroundState.getInstance();
 
-let currentDomain: string = "";
+// Инициализация при запуске
+const initialize = async () => {
+	// Загружаем моки
+	const result = await chrome.storage.local.get(["mocks"]);
+	state.mocks = result.mocks || [];
+	notifyMocksUpdated(state.mocks);
 
-const getDomainFromUrl = (url: string): string => {
-	try {
-		const urlObj = new URL(url);
-		return urlObj.hostname;
-	} catch (e) {
-		return "";
-	}
-};
-
-const notifyHistoryUpdated = (newEntry?: any) => {
-	chrome.runtime
-		.sendMessage({
-			type: "HISTORY_UPDATED",
-			payload: {
-				newEntry,
-				fullHistory: detailedRequestHistory,
-			},
-		})
-		.catch(() => {});
-
-	chrome.tabs.query({}, (tabs) => {
-		tabs.forEach((tab) => {
+	// Восстанавливаем историю для всех открытых вкладок
+	chrome.tabs.query({}, async (tabs) => {
+		for (const tab of tabs) {
 			if (tab.id) {
-				chrome.tabs
-					.sendMessage(tab.id, {
-						type: "HISTORY_UPDATED",
-						payload: {
-							newEntry,
-							fullHistory: detailedRequestHistory,
-						},
-					})
-					.catch(() => {});
-			}
-		});
-	});
-};
-
-const clearHistory = () => {
-	requestHistory = [];
-	detailedRequestHistory = [];
-
-	chrome.storage.local.set({
-		requestHistory: [],
-		detailedRequestHistory: [],
-	});
-};
-
-const checkAndUpdateDomain = () => {
-	chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-		if (tabs[0] && tabs[0].url) {
-			const newDomain = getDomainFromUrl(tabs[0].url);
-
-			// Если домен изменился, очищаем историю
-			if (currentDomain && currentDomain !== newDomain && newDomain !== "") {
-				clearHistory();
-				notifyHistoryUpdated();
-				console.log(
-					`Domain changed from ${currentDomain} to ${newDomain}, history cleared`,
-				);
-			}
-
-			// Обновляем текущий домен
-			if (newDomain) {
-				currentDomain = newDomain;
+				await loadTabHistory(tab.id);
 			}
 		}
+
+		// Инициализируем активную вкладку
+		await updateActiveTab();
 	});
 };
 
-chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
-	if (changeInfo.url && tab.active) {
-		checkAndUpdateDomain();
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+	if (changeInfo.url) {
+		checkAndUpdateDomain(tabId, changeInfo.url);
+
+		if (tabId === state.getActiveTabId()) {
+			notifyHistoryUpdated();
+		}
 	}
 });
 
 chrome.tabs.onActivated.addListener(() => {
-	checkAndUpdateDomain();
+	updateActiveTab();
 });
 
 chrome.windows.onFocusChanged.addListener((windowId) => {
 	if (windowId !== chrome.windows.WINDOW_ID_NONE) {
-		checkAndUpdateDomain();
+		updateActiveTab();
 	}
 });
 
-chrome.runtime.onStartup.addListener(async () => {
-	const result = await chrome.storage.local.get([
-		"mocks",
-		"detailedRequestHistory",
-	]);
-	mocks = result.mocks || [];
-	detailedRequestHistory = result.detailedRequestHistory || [];
-	notifyMocksUpdated(mocks);
-	checkAndUpdateDomain();
+chrome.tabs.onRemoved.addListener((tabId) => {
+	state.clearTabData(tabId);
+	chrome.storage.local.remove([`tabHistory_${tabId}`, `tabDomain_${tabId}`]);
 });
 
-chrome.runtime.onInstalled.addListener(async () => {
-	const result = await chrome.storage.local.get([
-		"mocks",
-		"detailedRequestHistory",
-	]);
-	mocks = result.mocks || [];
-	detailedRequestHistory = result.detailedRequestHistory || [];
-	notifyMocksUpdated(mocks);
-	checkAndUpdateDomain();
+chrome.runtime.onStartup.addListener(() => {
+	initialize();
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+	initialize();
 });
 
 chrome.action.onClicked.addListener(() => {
@@ -137,41 +89,58 @@ chrome.webRequest.onCompleted.addListener(
 			timeStamp,
 			statusCode,
 		};
-		requestHistory.push(entry);
+		state.requestHistory.push(entry);
 
-		if (requestHistory.length > 100) requestHistory.shift();
+		if (state.requestHistory.length > 100) state.requestHistory.shift();
 
-		chrome.storage.local.set({ requestHistory });
+		chrome.storage.local.set({ requestHistory: state.requestHistory });
 	},
 	{ urls: ["<all_urls>"] },
 );
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 	switch (message.type) {
 		case "LOG_REQUEST": {
+			const tabId = sender.tab?.id || state.getActiveTabId();
+
+			if (!tabId) {
+				sendResponse({ success: false, error: "No active tab" });
+				return true;
+			}
+
+			const history = state.getTabHistory(tabId);
+
 			const detailedEntry = {
 				...message.payload,
 				id: crypto.randomUUID(),
+				tabId,
 			};
 
-			detailedRequestHistory.push(detailedEntry);
+			history.push(detailedEntry);
 
-			if (detailedRequestHistory.length > 100) {
-				detailedRequestHistory.shift();
+			if (history.length > 100) {
+				history.shift();
 			}
 
-			chrome.storage.local.set({ detailedRequestHistory }, () => {
-				notifyHistoryUpdated(detailedEntry);
-			});
+			state.setTabHistory(tabId, history);
+
+			chrome.storage.local.set(
+				{
+					[`tabHistory_${tabId}`]: history,
+				},
+				() => {
+					if (tabId === state.getActiveTabId()) {
+						notifyHistoryUpdated(detailedEntry);
+					}
+				},
+			);
 
 			sendResponse({ success: true });
 			return true;
 		}
 
 		case "GET_DETAILED_HISTORY":
-			chrome.storage.local.get("detailedRequestHistory", (result) => {
-				sendResponse(result.detailedRequestHistory || []);
-			});
+			sendResponse(getActiveTabHistory());
 			return true;
 
 		case "GET_HISTORY":
@@ -181,57 +150,57 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 			return true;
 
 		case "SET_MOCK":
-			mocks.push(message.payload);
-			chrome.storage.local.set({ mocks }, () => {
-				notifyMocksUpdated(mocks);
+			state.mocks.push(message.payload);
+			chrome.storage.local.set({ mocks: state.mocks }, () => {
+				notifyMocksUpdated(state.mocks);
 				sendResponse({ success: true });
 			});
 			return true;
 
 		case "GET_MOCKS":
 			chrome.storage.local.get("mocks", (result) => {
-				mocks = result.mocks || [];
-				sendResponse(mocks);
+				state.mocks = result.mocks || [];
+				sendResponse(state.mocks);
 			});
 			return true;
 
-		case "CLEAR_HISTORY":
-			requestHistory = [];
-			detailedRequestHistory = [];
-			chrome.storage.local.set(
-				{
-					requestHistory: [],
-					detailedRequestHistory: [],
-				},
-				() => {
-					notifyHistoryUpdated();
-					sendResponse({ success: true });
-				},
-			);
+		case "CLEAR_HISTORY": {
+			const activeTabId = state.getActiveTabId();
+			if (activeTabId) {
+				clearTabHistory(activeTabId);
+			}
+			sendResponse({ success: true });
 			return true;
+		}
 
-		case "CLEAR_DETAILED_HISTORY":
-			detailedRequestHistory = [];
-			chrome.storage.local.set({ detailedRequestHistory: [] }, () => {
-				notifyHistoryUpdated();
-				sendResponse({ success: true });
-			});
+		case "CLEAR_DETAILED_HISTORY": {
+			const activeTab = state.getActiveTabId();
+			if (activeTab) {
+				clearTabHistory(activeTab);
+			}
+			sendResponse({ success: true });
 			return true;
+		}
 
 		case "REMOVE_MOCK":
-			mocks = mocks.filter((m) => m.id !== message.payload.id);
-			chrome.storage.local.set({ mocks }, () => {
-				notifyMocksUpdated(mocks);
+			state.mocks = state.mocks.filter((m) => m.id !== message.payload.id);
+			chrome.storage.local.set({ mocks: state.mocks }, () => {
+				notifyMocksUpdated(state.mocks);
 				sendResponse({ success: true });
 			});
 			return true;
 
 		case "UPDATE_MOCK": {
-			const mockIndex = mocks.findIndex((m) => m.id === message.payload.id);
+			const mockIndex = state.mocks.findIndex(
+				(m) => m.id === message.payload.id,
+			);
 			if (mockIndex !== -1) {
-				mocks[mockIndex] = { ...mocks[mockIndex], ...message.payload };
-				chrome.storage.local.set({ mocks }, () => {
-					notifyMocksUpdated(mocks);
+				state.mocks[mockIndex] = {
+					...state.mocks[mockIndex],
+					...message.payload,
+				};
+				chrome.storage.local.set({ mocks: state.mocks }, () => {
+					notifyMocksUpdated(state.mocks);
 					sendResponse({ success: true });
 				});
 			} else {
@@ -241,11 +210,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 		}
 
 		case "TOGGLE_MOCK": {
-			const toggleIndex = mocks.findIndex((m) => m.id === message.payload.id);
+			const toggleIndex = state.mocks.findIndex(
+				(m) => m.id === message.payload.id,
+			);
 			if (toggleIndex !== -1) {
-				mocks[toggleIndex].enabled = message.payload.enabled;
-				chrome.storage.local.set({ mocks }, () => {
-					notifyMocksUpdated(mocks);
+				state.mocks[toggleIndex].enabled = message.payload.enabled;
+				chrome.storage.local.set({ mocks: state.mocks }, () => {
+					notifyMocksUpdated(state.mocks);
 					sendResponse({ success: true });
 				});
 			} else {
@@ -255,9 +226,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 		}
 
 		case "CLEAR_ALL_MOCKS":
-			mocks = [];
+			state.mocks = [];
 			chrome.storage.local.set({ mocks: [] }, () => {
-				notifyMocksUpdated(mocks);
+				notifyMocksUpdated(state.mocks);
 				sendResponse({ success: true });
 			});
 			return true;
