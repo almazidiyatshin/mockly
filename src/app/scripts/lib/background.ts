@@ -152,14 +152,12 @@ export const updateActiveTab = async () => {
 			const currentActiveTabId = state.getActiveTabId();
 
 			if (currentActiveTabId !== newActiveTabId) {
-				// Сохраняем историю предыдущей активной вкладки
 				if (currentActiveTabId) {
 					saveTabHistory(currentActiveTabId);
 				}
 
 				state.setActiveTabId(newActiveTabId);
 
-				// Загружаем историю новой активной вкладки
 				await loadTabHistory(newActiveTabId);
 
 				notifyHistoryUpdated();
@@ -172,5 +170,21 @@ export const updateActiveTab = async () => {
 				}
 			}
 		}
+	});
+};
+
+export const initialize = async (state: BackgroundState) => {
+	const result = await chrome.storage.local.get(["mocks"]);
+	state.mocks = result.mocks || [];
+	notifyMocksUpdated(state.mocks);
+
+	chrome.tabs.query({}, async (tabs) => {
+		for (const tab of tabs) {
+			if (tab.id) {
+				await loadTabHistory(tab.id);
+			}
+		}
+
+		await updateActiveTab();
 	});
 };

@@ -3,7 +3,7 @@ import {
 	checkAndUpdateDomain,
 	clearTabHistory,
 	getActiveTabHistory,
-	loadTabHistory,
+	initialize,
 	notifyHistoryUpdated,
 	notifyMocksUpdated,
 	shouldIgnore,
@@ -13,27 +13,16 @@ import { BackgroundState } from "./lib/background-state";
 
 const state = BackgroundState.getInstance();
 
-// Инициализация при запуске
-const initialize = async () => {
-	// Загружаем моки
-	const result = await chrome.storage.local.get(["mocks"]);
-	state.mocks = result.mocks || [];
-	notifyMocksUpdated(state.mocks);
-
-	// Восстанавливаем историю для всех открытых вкладок
-	chrome.tabs.query({}, async (tabs) => {
-		for (const tab of tabs) {
-			if (tab.id) {
-				await loadTabHistory(tab.id);
-			}
-		}
-
-		// Инициализируем активную вкладку
-		await updateActiveTab();
-	});
-};
-
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+	if (changeInfo.status === "loading" && !changeInfo.url) {
+		clearTabHistory(tabId);
+		console.log(`Tab ${tabId}: Page refreshed, history cleared`);
+
+		if (tabId === state.getActiveTabId()) {
+			notifyHistoryUpdated();
+		}
+	}
+
 	if (changeInfo.url) {
 		checkAndUpdateDomain(tabId, changeInfo.url);
 
@@ -59,11 +48,11 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 chrome.runtime.onStartup.addListener(() => {
-	initialize();
+	initialize(state);
 });
 
 chrome.runtime.onInstalled.addListener(() => {
-	initialize();
+	initialize(state);
 });
 
 chrome.action.onClicked.addListener(() => {
