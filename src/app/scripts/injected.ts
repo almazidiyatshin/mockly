@@ -114,19 +114,50 @@
 	};
 
 	const cloneAndReadResponse = async (response: Response): Promise<string> => {
-		const contentType = response.headers.get("content-type");
-		const clonedResponse = response.clone();
+		const contentType = response.headers.get("content-type") || "";
 
 		try {
-			if (contentType && contentType.includes("application/json")) {
-				const body = await clonedResponse.json();
-				return JSON.stringify(body);
-			} else {
-				const body = await clonedResponse.text();
-				return body;
+			if (!response.body) {
+				return "";
 			}
-		} catch {
-			return "";
+
+			if (response.status === 204 || response.status === 304) {
+				return "";
+			}
+
+			if (
+				contentType.includes("application/octet-stream") ||
+				contentType.includes("image/") ||
+				contentType.includes("video/") ||
+				contentType.includes("audio/") ||
+				contentType.includes("application/pdf") ||
+				contentType.includes("application/zip")
+			) {
+				return "[Binary data]";
+			}
+
+			const text = await response.text();
+
+			if (text.length > 1000) {
+				if (contentType.includes("application/json")) {
+					try {
+						const parsed = JSON.parse(text);
+						const stringified = JSON.stringify(parsed);
+						if (stringified.length > 1000) {
+							return stringified.substring(0, 1000) + "...";
+						}
+						return stringified;
+					} catch {
+						return text.substring(0, 1000) + "...";
+					}
+				}
+				return text.substring(0, 1000) + "...";
+			}
+
+			return text;
+		} catch (error) {
+			console.warn("Error reading response body:", error);
+			return `[Error reading response: ${(error as Error).message}]`;
 		}
 	};
 
@@ -209,24 +240,56 @@
 			return Promise.resolve(mockResponse);
 		}
 
-		const response = await originalFetch.apply(this, args);
+		// Для немокированных запросов
+		try {
+			const response = await originalFetch.apply(this, args);
 
-		const responseBody = await cloneAndReadResponse(response);
+			// Клонируем response перед чтением, чтобы оригинал остался нетронутым
+			const clonedResponse = response.clone();
 
-		window.postMessage(
-			{
-				type: "MOCKLY_REQUEST_COMPLETED",
-				url: url,
-				method: method,
-				responseBody: responseBody,
-				statusCode: response.status,
-				isMocked: false,
-				timestamp: Date.now(),
-			},
-			"*",
-		);
+			// Читаем тело ответа безопасно
+			let responseBody = "";
+			try {
+				responseBody = await cloneAndReadResponse(clonedResponse);
+			} catch (readError) {
+				console.warn("Could not read response body:", readError);
+				responseBody = "[Could not read response body]";
+			}
 
-		return response;
+			window.postMessage(
+				{
+					type: "MOCKLY_REQUEST_COMPLETED",
+					url: url,
+					method: method,
+					responseBody: responseBody,
+					statusCode: response.status,
+					isMocked: false,
+					timestamp: Date.now(),
+				},
+				"*",
+			);
+
+			// Возвращаем оригинальный нетронутый response
+			return response;
+		} catch (error) {
+			// Логируем ошибку для отладки
+			console.error("Fetch interceptor error:", error);
+
+			// Отправляем сообщение об ошибке
+			window.postMessage(
+				{
+					type: "MOCKLY_REQUEST_ERROR",
+					url: url,
+					method: method,
+					error: (error as Error).message || "Unknown error",
+					timestamp: Date.now(),
+				},
+				"*",
+			);
+
+			// Пробрасываем ошибку дальше
+			throw error;
+		}
 	};
 
 	//@ts-ignore
