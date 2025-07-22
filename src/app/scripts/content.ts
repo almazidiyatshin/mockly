@@ -1,62 +1,74 @@
-import { setupMocking } from "./lib/content";
+import { MockManager } from "./lib/content";
+import { MessageType, type MocklyMessage } from "./types";
 
-let currentMocks: any[] = [];
+const MOCKLY_PREFIX = "Mockly:" as const;
 
-chrome.runtime.sendMessage({ type: "GET_MOCKS" }, (response) => {
+const mockManager = new MockManager();
+
+const log = {
+	debug: (message: string, ...args: any[]) =>
+		console.debug(`${MOCKLY_PREFIX} ${message}`, ...args),
+	error: (message: string, ...args: any[]) =>
+		console.error(`${MOCKLY_PREFIX} ${message}`, ...args),
+};
+
+const handleRuntimeError = (context: string): void => {
 	if (chrome.runtime.lastError) {
-		console.debug(
-			"Mockly: Could not get mocks:",
-			chrome.runtime.lastError.message,
-		);
-		return;
+		log.debug(`${context}: ${chrome.runtime.lastError.message}`);
 	}
-	if (response) {
-		currentMocks = response.filter((mock: any) => mock.enabled !== false);
-		setupMocking(currentMocks);
+};
+
+const initializeMocks = async (): Promise<void> => {
+	try {
+		const response = await chrome.runtime.sendMessage({
+			type: MessageType.GET_MOCKS,
+		});
+
+		if (response) {
+			await mockManager.updateMocks(response);
+		}
+	} catch (error) {
+		log.debug("Could not get mocks:", error);
+	}
+};
+
+chrome.runtime.onMessage.addListener((message: MocklyMessage) => {
+	if (message.type === MessageType.MOCKS_UPDATED && message.payload) {
+		mockManager.updateMocks(message.payload);
 	}
 });
 
-chrome.runtime.onMessage.addListener((message) => {
-	if (message.type === "MOCKS_UPDATED") {
-		currentMocks = message.payload.filter(
-			(mock: any) => mock.enabled !== false,
-		);
-		setupMocking(currentMocks);
-	}
-});
-
-window.addEventListener("message", (event) => {
+window.addEventListener("message", (event: MessageEvent) => {
 	if (event.source !== window) return;
 
+	const { data } = event;
+
 	if (
-		event.data.type === "MOCKLY_REQUEST_INTERCEPTED" ||
-		event.data.type === "MOCKLY_REQUEST_COMPLETED"
+		data.type === "MOCKLY_REQUEST_INTERCEPTED" ||
+		data.type === "MOCKLY_REQUEST_COMPLETED"
 	) {
+		const payload = {
+			url: data.url,
+			method: data.method,
+			responseBody: data.responseBody,
+			statusCode: data.statusCode,
+			isMocked: data.isMocked,
+			mockId: data.mockId,
+			timestamp: Date.now(),
+		};
+
 		try {
 			chrome.runtime.sendMessage(
 				{
-					type: "LOG_REQUEST",
-					payload: {
-						url: event.data.url,
-						method: event.data.method,
-						responseBody: event.data.responseBody,
-						statusCode: event.data.statusCode,
-						isMocked: event.data.isMocked,
-						mockId: event.data.mockId,
-						timestamp: Date.now(),
-					},
+					type: MessageType.LOG_REQUEST,
+					payload,
 				},
-				() => {
-					if (chrome.runtime.lastError) {
-						console.debug(
-							"Mockly: Could not log request:",
-							chrome.runtime.lastError.message,
-						);
-					}
-				},
+				() => handleRuntimeError("Could not log request"),
 			);
 		} catch (error) {
-			console.debug("Mockly: Error sending message:", error);
+			log.debug("Error sending message:", error);
 		}
 	}
 });
+
+initializeMocks();

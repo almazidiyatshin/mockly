@@ -1,209 +1,214 @@
 (() => {
-	const normalizeUrl = (inputUrl: string) => {
-		if (inputUrl.startsWith("/")) {
-			return window.location.origin + inputUrl;
-		}
-		return inputUrl;
+	// Типы
+	interface Mock {
+		id: string;
+		url?: string;
+		urlPattern?: string;
+		method?: string;
+		response: any;
+		statusCode?: number;
+		headers?: Record<string, string>;
+		delay?: number;
+		enabled?: boolean;
+	}
+
+	interface InterceptedRequest {
+		type: string;
+		url: string;
+		method: string;
+		mockId?: string;
+		responseBody: string;
+		statusCode: number;
+		isMocked: boolean;
+		timestamp: number;
+		error?: string;
+	}
+
+	// Константы
+	const MESSAGE_TYPES = {
+		MOCKS_UPDATE: "MOCKLY_MOCKS_UPDATE",
+		REQUEST_INTERCEPTED: "MOCKLY_REQUEST_INTERCEPTED",
+		REQUEST_COMPLETED: "MOCKLY_REQUEST_COMPLETED",
+		REQUEST_ERROR: "MOCKLY_REQUEST_ERROR",
+	} as const;
+
+	const IGNORE_PATTERNS = [
+		/chrome-extension:/,
+		/moz-extension:/,
+		/about:/,
+		/javascript:/,
+		/data:/,
+		/blob:/,
+		/metrics\.yandex\.ru/,
+		/mc\.yandex\.ru/,
+		/google-analytics\.com/,
+		/gtm\.js/,
+		/clarity\.ms/,
+		/facebook\.com\/tr/,
+		/doubleclick\.net/,
+	];
+
+	const STATUS_TEXTS: Record<number, string> = {
+		200: "OK",
+		201: "Created",
+		204: "No Content",
+		400: "Bad Request",
+		401: "Unauthorized",
+		403: "Forbidden",
+		404: "Not Found",
+		500: "Internal Server Error",
+		502: "Bad Gateway",
+		503: "Service Unavailable",
 	};
 
-	const getPathFromUrl = (inputUrl: string) => {
-		try {
-			const urlObj = new URL(inputUrl, window.location.origin);
-			return urlObj.pathname + urlObj.search;
-		} catch {
+	const BINARY_CONTENT_TYPES = [
+		"application/octet-stream",
+		"image/",
+		"video/",
+		"audio/",
+		"application/pdf",
+		"application/zip",
+	];
+
+	const MAX_RESPONSE_LENGTH = 1000;
+	const DEFAULT_DELAY = 10;
+
+	/**
+	 * Класс для управления моками
+	 */
+	class MockManager {
+		private mocks: Mock[] = [];
+
+		/**
+		 * Обновляет список моков
+		 */
+		updateMocks(mocks: Mock[]): void {
+			this.mocks = mocks.filter((mock) => mock.enabled !== false);
+		}
+
+		/**
+		 * Находит подходящий мок для URL и метода
+		 */
+		findMock(url: string, method: string = "GET"): Mock | null {
+			if (this.mocks.length === 0) return null;
+
+			const normalizedUrl = this.normalizeUrl(url);
+			const requestPath = this.getPathFromUrl(url);
+
+			return (
+				this.mocks.find((mock) => {
+					if (!this.isMethodMatch(mock, method)) return false;
+
+					return this.isUrlMatch(mock, normalizedUrl, requestPath);
+				}) || null
+			);
+		}
+
+		private normalizeUrl(inputUrl: string): string {
+			if (inputUrl.startsWith("/")) {
+				return window.location.origin + inputUrl;
+			}
 			return inputUrl;
 		}
-	};
 
-	const findMockForUrl = (url: string, method = "GET", mocks: any[]) => {
-		if (mocks.length === 0) return null;
-
-		const hasMocks = mocks.some((mock) => {
-			if (mock.enabled === false) return false;
-			const methodMatch =
-				!mock.method || mock.method.toLowerCase() === method.toLowerCase();
-			return methodMatch;
-		});
-
-		if (!hasMocks) {
-			return null;
+		private getPathFromUrl(inputUrl: string): string {
+			try {
+				const urlObj = new URL(inputUrl, window.location.origin);
+				return urlObj.pathname + urlObj.search;
+			} catch {
+				return inputUrl;
+			}
 		}
 
-		const mock = mocks.find((mock) => {
-			const enabled = mock.enabled !== false;
-			if (!enabled) return false;
+		private isMethodMatch(mock: Mock, method: string): boolean {
+			return !mock.method || mock.method.toLowerCase() === method.toLowerCase();
+		}
 
-			const methodMatch =
-				!mock.method || mock.method.toLowerCase() === method.toLowerCase();
-			if (!methodMatch) return false;
+		private isUrlMatch(
+			mock: Mock,
+			normalizedUrl: string,
+			requestPath: string,
+		): boolean {
+			// Exact URL match
+			if (mock.url) {
+				const normalizedMockUrl = this.normalizeUrl(mock.url);
 
-			const normalizedUrl = normalizeUrl(url);
-			const normalizedMockUrl = normalizeUrl(mock.url);
+				if (normalizedUrl === normalizedMockUrl) return true;
 
-			const exactMatch = normalizedUrl === normalizedMockUrl;
-			const urlWithoutQuery = normalizedUrl.split("?")[0];
-			const mockUrlWithoutQuery = normalizedMockUrl.split("?")[0];
-			const baseUrlMatch = urlWithoutQuery === mockUrlWithoutQuery;
+				// Base URL match (without query)
+				const [urlBase] = normalizedUrl.split("?");
+				const [mockBase] = normalizedMockUrl.split("?");
+				if (urlBase === mockBase) return true;
 
-			const requestPath = getPathFromUrl(url);
-			const mockPath = getPathFromUrl(mock.url);
-			const pathMatch = requestPath === mockPath;
-			const requestPathOnly = requestPath.split("?")[0];
-			const mockPathOnly = mockPath.split("?")[0];
-			const pathOnlyMatch = requestPathOnly === mockPathOnly;
+				// Path match
+				const mockPath = this.getPathFromUrl(mock.url);
+				if (requestPath === mockPath) return true;
 
-			let regexMatch = false;
+				// Path only match (without query)
+				const [pathBase] = requestPath.split("?");
+				const [mockPathBase] = mockPath.split("?");
+				if (pathBase === mockPathBase) return true;
+			}
 
+			// Regex pattern match
 			if (mock.urlPattern) {
 				try {
 					const regex = new RegExp(mock.urlPattern);
-					regexMatch = regex.test(normalizedUrl);
+					return regex.test(normalizedUrl);
 				} catch {
 					console.warn("Invalid regex pattern:", mock.urlPattern);
 				}
 			}
 
-			const urlMatch =
-				exactMatch || baseUrlMatch || pathMatch || pathOnlyMatch || regexMatch;
-
-			return urlMatch;
-		});
-
-		return mock;
-	};
-
-	const shouldInterceptRequest = (url: string) => {
-		const ignorePatterns = [
-			/chrome-extension:/,
-			/moz-extension:/,
-			/about:/,
-			/javascript:/,
-			/data:/,
-			/blob:/,
-			/metrics\.yandex\.ru/,
-			/mc\.yandex\.ru/,
-			/google-analytics\.com/,
-			/gtm\.js/,
-			/clarity\.ms/,
-			/facebook\.com\/tr/,
-			/doubleclick\.net/,
-		];
-
-		const shouldIgnore = ignorePatterns.some((pattern) => pattern.test(url));
-		if (shouldIgnore) {
 			return false;
 		}
+	}
 
-		return true;
-	};
+	/**
+	 * Класс для перехвата HTTP запросов
+	 */
+	class RequestInterceptor {
+		private mockManager = new MockManager();
+		private originalFetch = window.fetch;
+		private originalXHR = window.XMLHttpRequest;
 
-	const getStatusText = (status: number) => {
-		const statusTexts: Record<number, string> = {
-			200: "OK",
-			201: "Created",
-			204: "No Content",
-			400: "Bad Request",
-			401: "Unauthorized",
-			403: "Forbidden",
-			404: "Not Found",
-			500: "Internal Server Error",
-			502: "Bad Gateway",
-			503: "Service Unavailable",
-		};
-		return statusTexts[status] || "Unknown";
-	};
+		constructor() {
+			this.setupMessageListener();
+			this.interceptFetch();
+			this.interceptXHR();
+		}
 
-	const cloneAndReadResponse = async (response: Response): Promise<string> => {
-		const contentType = response.headers.get("content-type") || "";
+		/**
+		 * Настраивает слушатель сообщений для обновления моков
+		 */
+		private setupMessageListener(): void {
+			window.addEventListener("message", (event) => {
+				if (event.source !== window) return;
 
-		try {
-			if (!response.body) {
-				return "";
-			}
-
-			if (response.status === 204 || response.status === 304) {
-				return "";
-			}
-
-			if (
-				contentType.includes("application/octet-stream") ||
-				contentType.includes("image/") ||
-				contentType.includes("video/") ||
-				contentType.includes("audio/") ||
-				contentType.includes("application/pdf") ||
-				contentType.includes("application/zip")
-			) {
-				return "[Binary data]";
-			}
-
-			const text = await response.text();
-
-			if (text.length > 1000) {
-				if (contentType.includes("application/json")) {
-					try {
-						const parsed = JSON.parse(text);
-						const stringified = JSON.stringify(parsed);
-						if (stringified.length > 1000) {
-							return stringified.substring(0, 1000) + "...";
-						}
-						return stringified;
-					} catch {
-						return text.substring(0, 1000) + "...";
-					}
+				if (event.data.type === MESSAGE_TYPES.MOCKS_UPDATE) {
+					this.mockManager.updateMocks(event.data.mocks);
 				}
-				return text.substring(0, 1000) + "...";
-			}
-
-			return text;
-		} catch (error) {
-			console.warn("Error reading response body:", error);
-			return `[Error reading response: ${(error as Error).message}]`;
-		}
-	};
-
-	let mocks: any = [];
-	const originalFetch = window.fetch;
-	const originalXHR = window.XMLHttpRequest;
-
-	window.addEventListener("message", (event) => {
-		if (event.source !== window) return;
-
-		if (event.data.type === "MOCKLY_MOCKS_UPDATE") {
-			mocks = event.data.mocks;
-		}
-	});
-
-	window.fetch = async function (...args: [RequestInfo | URL, RequestInit?]) {
-		const [input, init = {}] = args;
-
-		let url: string;
-
-		if (typeof input === "string") {
-			url = input;
-		} else if (input instanceof Request) {
-			url = input.url;
-		} else if (input instanceof URL) {
-			url = input.toString();
-		} else {
-			throw new Error("Unsupported fetch input");
+			});
 		}
 
-		const method = init.method || "GET";
-
-		if (!shouldInterceptRequest(url)) {
-			return originalFetch.apply(this, args);
+		private shouldInterceptRequest(url: string): boolean {
+			return !IGNORE_PATTERNS.some((pattern) => pattern.test(url));
 		}
 
-		const mock = findMockForUrl(url, method, mocks);
+		private getStatusText(status: number): string {
+			return STATUS_TEXTS[status] || "Unknown";
+		}
 
-		if (mock) {
-			const mockHeaders = new Headers();
-			mockHeaders.set("Content-Type", "application/json");
+		private postMessage(data: InterceptedRequest): void {
+			window.postMessage(data, "*");
+		}
+
+		private async createMockResponse(mock: Mock): Promise<Response> {
+			const headers = new Headers({ "Content-Type": "application/json" });
 
 			if (mock.headers) {
 				Object.entries(mock.headers).forEach(([name, value]) => {
-					//@ts-ignore
-					mockHeaders.set(name, value);
+					headers.set(name, value);
 				});
 			}
 
@@ -212,261 +217,334 @@
 					? mock.response
 					: JSON.stringify(mock.response);
 
-			const mockResponse = new Response(responseBody, {
-				status: mock.statusCode || 200,
-				statusText: getStatusText(mock.statusCode || 200),
-				headers: mockHeaders,
-			});
+			const status = mock.statusCode || 200;
 
-			window.postMessage(
-				{
-					type: "MOCKLY_REQUEST_INTERCEPTED",
-					url: url,
-					method: method,
+			if (mock.delay && mock.delay > 0) {
+				await new Promise((resolve) => setTimeout(resolve, mock.delay));
+			}
+
+			return new Response(responseBody, {
+				status,
+				statusText: this.getStatusText(status),
+				headers,
+			});
+		}
+
+		private async readResponseBody(response: Response): Promise<string> {
+			const contentType = response.headers.get("content-type") || "";
+
+			try {
+				if (
+					!response.body ||
+					response.status === 204 ||
+					response.status === 304
+				) {
+					return "";
+				}
+
+				if (BINARY_CONTENT_TYPES.some((type) => contentType.includes(type))) {
+					return "[Binary data]";
+				}
+
+				const text = await response.text();
+
+				if (text.length <= MAX_RESPONSE_LENGTH) {
+					return text;
+				}
+
+				// Try to parse and stringify JSON for better formatting
+				if (contentType.includes("application/json")) {
+					try {
+						const parsed = JSON.parse(text);
+						const stringified = JSON.stringify(parsed);
+						return stringified.length > MAX_RESPONSE_LENGTH
+							? stringified.substring(0, MAX_RESPONSE_LENGTH) + "..."
+							: stringified;
+					} catch {
+						// Fall through to regular truncation
+					}
+				}
+
+				return text.substring(0, MAX_RESPONSE_LENGTH) + "...";
+			} catch (error) {
+				console.warn("Error reading response body:", error);
+				return `[Error reading response: ${(error as Error).message}]`;
+			}
+		}
+
+		private interceptFetch(): void {
+			const self = this;
+
+			window.fetch = async function (...args: Parameters<typeof fetch>) {
+				const [input, init = {}] = args;
+
+				let url: string;
+				if (typeof input === "string") {
+					url = input;
+				} else if (input instanceof Request) {
+					url = input.url;
+				} else if (input instanceof URL) {
+					url = input.toString();
+				} else {
+					throw new Error("Unsupported fetch input");
+				}
+
+				const method = init.method || "GET";
+
+				if (!self.shouldInterceptRequest(url)) {
+					return self.originalFetch.apply(this, args);
+				}
+
+				const mock = self.mockManager.findMock(url, method);
+
+				if (mock) {
+					const response = await self.createMockResponse(mock);
+					const responseBody = await response.clone().text();
+
+					self.postMessage({
+						type: MESSAGE_TYPES.REQUEST_INTERCEPTED,
+						url,
+						method,
+						mockId: mock.id,
+						responseBody,
+						statusCode: response.status,
+						isMocked: true,
+						timestamp: Date.now(),
+					});
+
+					return response;
+				}
+
+				// Handle real requests
+				try {
+					const response = await self.originalFetch.apply(this, args);
+					const clonedResponse = response.clone();
+
+					const responseBody = await self.readResponseBody(clonedResponse);
+
+					self.postMessage({
+						type: MESSAGE_TYPES.REQUEST_COMPLETED,
+						url,
+						method,
+						responseBody,
+						statusCode: response.status,
+						isMocked: false,
+						timestamp: Date.now(),
+					});
+
+					return response;
+				} catch (error) {
+					console.error("Fetch interceptor error:", error);
+
+					self.postMessage({
+						type: MESSAGE_TYPES.REQUEST_ERROR,
+						url,
+						method,
+						responseBody: "",
+						statusCode: 0,
+						isMocked: false,
+						error: (error as Error).message || "Unknown error",
+						timestamp: Date.now(),
+					});
+
+					throw error;
+				}
+			};
+		}
+
+		private interceptXHR(): void {
+			const self = this;
+
+			window.XMLHttpRequest = (() => {
+				const xhr = new self.originalXHR();
+				const originalOpen = xhr.open;
+				const originalSend = xhr.send;
+
+				let requestUrl = "";
+				let requestMethod = "GET";
+
+				xhr.open = function (
+					method: string,
+					url: string | URL,
+					...args: any[]
+				) {
+					requestUrl = url.toString();
+					requestMethod = method;
+					return originalOpen.apply(this, [method, url, ...args] as any);
+				};
+
+				xhr.send = function (body?: any) {
+					const mock = self.mockManager.findMock(requestUrl, requestMethod);
+
+					if (mock) {
+						self.handleMockedXHR(xhr, mock, requestUrl, requestMethod);
+						return;
+					}
+
+					self.handleRealXHR(xhr, requestUrl, requestMethod);
+					return originalSend.call(this, body);
+				};
+
+				return xhr;
+			}) as any;
+
+			// Copy static properties
+			Object.setPrototypeOf(window.XMLHttpRequest, this.originalXHR);
+
+			["UNSENT", "OPENED", "HEADERS_RECEIVED", "LOADING", "DONE"].forEach(
+				(prop) => {
+					Object.defineProperty(window.XMLHttpRequest, prop, {
+						value: (this.originalXHR as any)[prop],
+						writable: false,
+						enumerable: true,
+						configurable: false,
+					});
+				},
+			);
+		}
+
+		private handleMockedXHR(
+			xhr: XMLHttpRequest,
+			mock: Mock,
+			url: string,
+			method: string,
+		): void {
+			const delay = mock.delay || DEFAULT_DELAY;
+
+			setTimeout(() => {
+				const responseBody =
+					typeof mock.response === "string"
+						? mock.response
+						: JSON.stringify(mock.response);
+				const status = mock.statusCode || 200;
+
+				this.postMessage({
+					type: MESSAGE_TYPES.REQUEST_INTERCEPTED,
+					url,
+					method,
 					mockId: mock.id,
-					responseBody: responseBody,
-					statusCode: mock.statusCode || 200,
+					responseBody,
+					statusCode: status,
 					isMocked: true,
 					timestamp: Date.now(),
-				},
-				"*",
-			);
+				});
 
-			const delay = mock.delay || 0;
-			if (delay > 0) {
-				await new Promise((resolve) => setTimeout(resolve, delay));
-			}
+				// Set XHR properties
+				this.setXHRProperties(xhr, {
+					readyState: 4,
+					status,
+					statusText: this.getStatusText(status),
+					responseText: responseBody,
+					response: responseBody,
+				});
 
-			return Promise.resolve(mockResponse);
+				// Set response headers
+				this.setXHRHeaders(xhr, mock.headers);
+
+				// Trigger events
+				if (xhr.onreadystatechange) {
+					xhr.onreadystatechange.call(xhr, new Event("readystatechange"));
+				}
+				if (xhr.onload) {
+					xhr.onload.call(xhr, new ProgressEvent("load"));
+				}
+			}, delay);
 		}
 
-		// Для немокированных запросов
-		try {
-			const response = await originalFetch.apply(this, args);
-
-			// Клонируем response перед чтением, чтобы оригинал остался нетронутым
-			const clonedResponse = response.clone();
-
-			// Читаем тело ответа безопасно
-			let responseBody = "";
-			try {
-				responseBody = await cloneAndReadResponse(clonedResponse);
-			} catch (readError) {
-				console.warn("Could not read response body:", readError);
-				responseBody = "[Could not read response body]";
-			}
-
-			window.postMessage(
-				{
-					type: "MOCKLY_REQUEST_COMPLETED",
-					url: url,
-					method: method,
-					responseBody: responseBody,
-					statusCode: response.status,
-					isMocked: false,
-					timestamp: Date.now(),
-				},
-				"*",
-			);
-
-			// Возвращаем оригинальный нетронутый response
-			return response;
-		} catch (error) {
-			// Логируем ошибку для отладки
-			console.error("Fetch interceptor error:", error);
-
-			// Отправляем сообщение об ошибке
-			window.postMessage(
-				{
-					type: "MOCKLY_REQUEST_ERROR",
-					url: url,
-					method: method,
-					error: (error as Error).message || "Unknown error",
-					timestamp: Date.now(),
-				},
-				"*",
-			);
-
-			// Пробрасываем ошибку дальше
-			throw error;
-		}
-	};
-
-	//@ts-ignore
-	window.XMLHttpRequest = function XMLHttpRequest() {
-		const xhr = new originalXHR();
-		const originalOpen = xhr.open;
-		const originalSend = xhr.send;
-
-		let requestUrl = "";
-		let requestMethod = "GET";
-
-		//@ts-ignore
-		xhr.open = function (method, url, ...args) {
-			//@ts-ignore
-			requestUrl = url;
-			requestMethod = method;
-			//@ts-ignore
-			return originalOpen.apply(this, [method, url, ...args]);
-		};
-
-		xhr.send = function () {
-			const mock = findMockForUrl(requestUrl, requestMethod, mocks);
-
-			if (mock) {
-				const delay = mock.delay || 10;
-
-				setTimeout(() => {
-					const responseBody =
-						typeof mock.response === "string"
-							? mock.response
-							: JSON.stringify(mock.response);
-					const status = mock.statusCode || 200;
-					const statusText = getStatusText(status);
-
-					window.postMessage(
-						{
-							type: "MOCKLY_REQUEST_INTERCEPTED",
-							url: requestUrl,
-							method: requestMethod,
-							mockId: mock.id,
-							responseBody: responseBody,
-							statusCode: status,
-							isMocked: true,
-							timestamp: Date.now(),
-						},
-						"*",
-					);
-
-					Object.defineProperty(xhr, "readyState", {
-						value: 4,
-						writable: true,
-					});
-					Object.defineProperty(xhr, "status", {
-						value: status,
-						writable: true,
-					});
-					Object.defineProperty(xhr, "statusText", {
-						value: statusText,
-						writable: true,
-					});
-					Object.defineProperty(xhr, "responseText", {
-						value: responseBody,
-						writable: true,
-					});
-					Object.defineProperty(xhr, "response", {
-						value: responseBody,
-						writable: true,
-					});
-
-					xhr.getAllResponseHeaders = () => {
-						const headers = ["content-type: application/json"];
-						if (mock.headers) {
-							Object.entries(mock.headers).forEach(([name, value]) => {
-								headers.push(`${name.toLowerCase()}: ${value}`);
-							});
-						}
-						return headers.join("\r\n");
-					};
-					//@ts-ignore
-					xhr.getResponseHeader = (name) => {
-						const lowerName = name.toLowerCase();
-						if (mock.headers) {
-							for (const [headerName, headerValue] of Object.entries(
-								mock.headers,
-							)) {
-								if (headerName.toLowerCase() === lowerName) {
-									return headerValue;
-								}
-							}
-						}
-						if (lowerName === "content-type") {
-							return "application/json";
-						}
-						return null;
-					};
-
-					if (xhr.onreadystatechange) {
-						//@ts-ignore
-						xhr.onreadystatechange();
-					}
-
-					if (xhr.onload) {
-						//@ts-ignore
-						xhr.onload();
-					}
-				}, delay);
-
-				return;
-			}
-
+		private handleRealXHR(
+			xhr: XMLHttpRequest,
+			url: string,
+			method: string,
+		): void {
+			const self = this;
 			const originalOnReadyStateChange = xhr.onreadystatechange;
 
-			xhr.onreadystatechange = function () {
+			xhr.onreadystatechange = function (this: XMLHttpRequest, ev: Event) {
 				if (xhr.readyState === 4) {
-					let responseBody = "";
-					try {
-						if (xhr.responseType === "" || xhr.responseType === "text") {
-							responseBody = xhr.responseText;
-						} else if (xhr.responseType === "json") {
-							responseBody = JSON.stringify(xhr.response);
-						} else if (xhr.responseType === "document") {
-							responseBody = xhr.response?.documentElement?.outerHTML || "";
-						} else if (xhr.responseType === "arraybuffer") {
-							try {
-								const decoder = new TextDecoder();
-								responseBody = decoder.decode(xhr.response);
-							} catch {
-								responseBody = "[Binary data]";
-							}
-						} else if (xhr.responseType === "blob") {
-							responseBody = "[Blob data]";
-						} else {
-							responseBody = String(xhr.response);
-						}
-					} catch (e) {
-						responseBody = "";
-					}
+					const responseBody = self.extractXHRResponseBody(xhr);
 
-					// Отправляем сообщение с телом ответа
-					window.postMessage(
-						{
-							type: "MOCKLY_REQUEST_COMPLETED",
-							url: requestUrl,
-							method: requestMethod,
-							responseBody: responseBody,
-							statusCode: xhr.status,
-							isMocked: false,
-							timestamp: Date.now(),
-						},
-						"*",
-					);
+					self.postMessage({
+						type: MESSAGE_TYPES.REQUEST_COMPLETED,
+						url,
+						method,
+						responseBody,
+						statusCode: xhr.status,
+						isMocked: false,
+						timestamp: Date.now(),
+					});
 				}
 
 				if (originalOnReadyStateChange) {
-					//@ts-ignore
-					originalOnReadyStateChange.apply(this, arguments);
+					originalOnReadyStateChange.call(this, ev);
 				}
 			};
+		}
 
-			//@ts-ignore
-			return originalSend.apply(this, arguments);
-		};
-
-		return xhr;
-	};
-
-	Object.setPrototypeOf(window.XMLHttpRequest, originalXHR);
-
-	["UNSENT", "OPENED", "HEADERS_RECEIVED", "LOADING", "DONE"].forEach(
-		(prop) => {
-			Object.defineProperty(window.XMLHttpRequest, prop, {
-				//@ts-ignore
-				value: originalXHR[prop],
-				writable: false,
-				enumerable: true,
-				configurable: false,
+		private setXHRProperties(
+			xhr: XMLHttpRequest,
+			props: Record<string, any>,
+		): void {
+			Object.entries(props).forEach(([key, value]) => {
+				Object.defineProperty(xhr, key, { value, writable: true });
 			});
-		},
-	);
+		}
+
+		private setXHRHeaders(
+			xhr: XMLHttpRequest,
+			headers?: Record<string, string>,
+		): void {
+			const headersList = ["content-type: application/json"];
+
+			if (headers) {
+				Object.entries(headers).forEach(([name, value]) => {
+					headersList.push(`${name.toLowerCase()}: ${value}`);
+				});
+			}
+
+			xhr.getAllResponseHeaders = () => headersList.join("\r\n");
+
+			xhr.getResponseHeader = (name: string) => {
+				const lowerName = name.toLowerCase();
+
+				if (headers) {
+					for (const [headerName, headerValue] of Object.entries(headers)) {
+						if (headerName.toLowerCase() === lowerName) {
+							return headerValue;
+						}
+					}
+				}
+
+				return lowerName === "content-type" ? "application/json" : null;
+			};
+		}
+
+		private extractXHRResponseBody(xhr: XMLHttpRequest): string {
+			try {
+				switch (xhr.responseType) {
+					case "":
+					case "text":
+						return xhr.responseText;
+					case "json":
+						return JSON.stringify(xhr.response);
+					case "document":
+						return xhr.response?.documentElement?.outerHTML || "";
+					case "arraybuffer":
+						try {
+							const decoder = new TextDecoder();
+							return decoder.decode(xhr.response);
+						} catch {
+							return "[Binary data]";
+						}
+					case "blob":
+						return "[Blob data]";
+					default:
+						return String(xhr.response);
+				}
+			} catch {
+				return "";
+			}
+		}
+	}
+
+	new RequestInterceptor();
 })();
