@@ -32,22 +32,6 @@
 		REQUEST_ERROR: "MOCKLY_REQUEST_ERROR",
 	} as const;
 
-	const IGNORE_PATTERNS = [
-		/chrome-extension:/,
-		/moz-extension:/,
-		/about:/,
-		/javascript:/,
-		/data:/,
-		/blob:/,
-		/metrics\.yandex\.ru/,
-		/mc\.yandex\.ru/,
-		/google-analytics\.com/,
-		/gtm\.js/,
-		/clarity\.ms/,
-		/facebook\.com\/tr/,
-		/doubleclick\.net/,
-	];
-
 	const STATUS_TEXTS: Record<number, string> = {
 		200: "OK",
 		201: "Created",
@@ -70,38 +54,163 @@
 		"application/zip",
 	];
 
-	const MAX_RESPONSE_LENGTH = 1000;
-	const DEFAULT_DELAY = 10;
+	const MAX_RESPONSE_LENGTH = 500; // Уменьшено для лучшей производительности
+	const DEFAULT_DELAY = 0; // Убираем задержку по умолчанию
+
+	// Кэш для compiled regex patterns
+	const COMPILED_PATTERNS = new Map<string, RegExp>();
+
+	// Функция для безопасного экранирования строк в JSON
+	function escapeJsonString(str: string): string {
+		const result = str
+			.replace(/\\/g, "\\\\")
+			.replace(/"/g, '\\"')
+			.replace(/\n/g, "\\n")
+			.replace(/\r/g, "\\r")
+			.replace(/\t/g, "\\t")
+			.replace(/\f/g, "\\f")
+			.replace(/\b/g, "\\b");
+
+		// Заменяем управляющие символы без использования regex с управляющими символами
+		let escaped = "";
+		for (let i = 0; i < result.length; i++) {
+			const char = result[i];
+			const code = char.charCodeAt(0);
+
+			if ((code >= 0x00 && code <= 0x1f) || (code >= 0x7f && code <= 0x9f)) {
+				escaped += "\\u" + ("0000" + code.toString(16)).slice(-4);
+			} else {
+				escaped += char;
+			}
+		}
+
+		return escaped;
+	}
+
+	// Функция для создания валидного JSON ответа
+	function createSafeJsonResponse(
+		content: string,
+		type: string = "text",
+	): string {
+		try {
+			// Сначала пытаемся распарсить как JSON
+			JSON.parse(content);
+			return content; // Если уже валидный JSON, возвращаем как есть
+		} catch {
+			// Если не JSON, оборачиваем в объект
+			const truncated = content.substring(0, MAX_RESPONSE_LENGTH);
+			const escaped = escapeJsonString(truncated);
+			return JSON.stringify({ type, content: escaped });
+		}
+	}
 
 	/**
-	 * Класс для управления моками
+	 * Быстрая проверка URL на игнорирование
+	 */
+	function shouldIgnoreUrl(url: string): boolean {
+		// Быстрая проверка по началу URL
+		if (
+			url.startsWith("chrome-extension:") ||
+			url.startsWith("moz-extension:") ||
+			url.startsWith("about:") ||
+			url.startsWith("data:") ||
+			url.startsWith("blob:")
+		) {
+			return true;
+		}
+
+		// Проверяем аналитику и трекеры
+		if (
+			url.includes("google-analytics.com") ||
+			url.includes("gtm.js") ||
+			url.includes("clarity.ms") ||
+			url.includes("facebook.com/tr") ||
+			url.includes("doubleclick.net") ||
+			url.includes("yandex.ru")
+		) {
+			return true;
+		}
+
+		// Проверка CDN только для статических ресурсов
+		if (
+			url.includes("cdnjs.cloudflare.com") ||
+			url.includes("unpkg.com") ||
+			url.includes("jsdelivr.net") ||
+			url.includes("fonts.googleapis.com") ||
+			url.includes("fonts.gstatic.com")
+		) {
+			// Проверяем расширение файла
+			const lastDot = url.lastIndexOf(".");
+			if (lastDot > 0) {
+				const extension = url.substring(lastDot).toLowerCase();
+				if (
+					extension.match(
+						/\.(css|js|woff2?|ttf|eot|svg|png|jpe?g|gif|webp|ico)(\?|$)/,
+					)
+				) {
+					return true;
+				}
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * Оптимизированный класс для управления моками
 	 */
 	class MockManager {
 		private mocks: Mock[] = [];
+		private mocksByMethod = new Map<string, Mock[]>();
+		private exactUrlMocks = new Map<string, Mock>();
 
-		/**
-		 * Обновляет список моков
-		 */
 		updateMocks(mocks: Mock[]): void {
 			this.mocks = mocks.filter((mock) => mock.enabled !== false);
+			this.rebuildIndexes();
 		}
 
-		/**
-		 * Находит подходящий мок для URL и метода
-		 */
+		private rebuildIndexes(): void {
+			this.mocksByMethod.clear();
+			this.exactUrlMocks.clear();
+
+			for (const mock of this.mocks) {
+				const method = (mock.method || "GET").toLowerCase();
+
+				if (!this.mocksByMethod.has(method)) {
+					this.mocksByMethod.set(method, []);
+				}
+				this.mocksByMethod.get(method)!.push(mock);
+
+				// Индексируем точные URL для быстрого поиска
+				if (mock.url && !mock.urlPattern) {
+					const key = `${method}:${this.normalizeUrl(mock.url)}`;
+					this.exactUrlMocks.set(key, mock);
+				}
+			}
+		}
+
 		findMock(url: string, method: string = "GET"): Mock | null {
 			if (this.mocks.length === 0) return null;
 
+			const normalizedMethod = method.toLowerCase();
 			const normalizedUrl = this.normalizeUrl(url);
+
+			// Быстрый поиск по точному URL
+			const exactKey = `${normalizedMethod}:${normalizedUrl}`;
+			const exactMock = this.exactUrlMocks.get(exactKey);
+			if (exactMock) return exactMock;
+
+			// Поиск среди моков для данного метода
+			const methodMocks = this.mocksByMethod.get(normalizedMethod) || [];
 			const requestPath = this.getPathFromUrl(url);
 
-			return (
-				this.mocks.find((mock) => {
-					if (!this.isMethodMatch(mock, method)) return false;
+			for (const mock of methodMocks) {
+				if (this.isUrlMatch(mock, normalizedUrl, requestPath)) {
+					return mock;
+				}
+			}
 
-					return this.isUrlMatch(mock, normalizedUrl, requestPath);
-				}) || null
-			);
+			return null;
 		}
 
 		private normalizeUrl(inputUrl: string): string {
@@ -120,44 +229,39 @@
 			}
 		}
 
-		private isMethodMatch(mock: Mock, method: string): boolean {
-			return !mock.method || mock.method.toLowerCase() === method.toLowerCase();
-		}
-
 		private isUrlMatch(
 			mock: Mock,
 			normalizedUrl: string,
 			requestPath: string,
 		): boolean {
-			// Exact URL match
 			if (mock.url) {
 				const normalizedMockUrl = this.normalizeUrl(mock.url);
-
 				if (normalizedUrl === normalizedMockUrl) return true;
 
-				// Base URL match (without query)
 				const [urlBase] = normalizedUrl.split("?");
 				const [mockBase] = normalizedMockUrl.split("?");
 				if (urlBase === mockBase) return true;
 
-				// Path match
 				const mockPath = this.getPathFromUrl(mock.url);
 				if (requestPath === mockPath) return true;
 
-				// Path only match (without query)
 				const [pathBase] = requestPath.split("?");
 				const [mockPathBase] = mockPath.split("?");
 				if (pathBase === mockPathBase) return true;
 			}
 
-			// Regex pattern match
 			if (mock.urlPattern) {
-				try {
-					const regex = new RegExp(mock.urlPattern);
-					return regex.test(normalizedUrl);
-				} catch {
-					console.warn("Invalid regex pattern:", mock.urlPattern);
+				let regex = COMPILED_PATTERNS.get(mock.urlPattern);
+				if (!regex) {
+					try {
+						regex = new RegExp(mock.urlPattern);
+						COMPILED_PATTERNS.set(mock.urlPattern, regex);
+					} catch {
+						console.warn("Invalid regex pattern:", mock.urlPattern);
+						return false;
+					}
 				}
+				return regex.test(normalizedUrl);
 			}
 
 			return false;
@@ -165,7 +269,7 @@
 	}
 
 	/**
-	 * Класс для перехвата HTTP запросов
+	 * Оптимизированный класс для перехвата HTTP запросов
 	 */
 	class RequestInterceptor {
 		private mockManager = new MockManager();
@@ -178,21 +282,15 @@
 			this.interceptXHR();
 		}
 
-		/**
-		 * Настраивает слушатель сообщений для обновления моков
-		 */
 		private setupMessageListener(): void {
 			window.addEventListener("message", (event) => {
 				if (event.source !== window) return;
 
 				if (event.data.type === MESSAGE_TYPES.MOCKS_UPDATE) {
-					this.mockManager.updateMocks(event.data.mocks);
+					const mocks = event.data.mocks || [];
+					this.mockManager.updateMocks(mocks);
 				}
 			});
-		}
-
-		private shouldInterceptRequest(url: string): boolean {
-			return !IGNORE_PATTERNS.some((pattern) => pattern.test(url));
 		}
 
 		private getStatusText(status: number): string {
@@ -200,7 +298,12 @@
 		}
 
 		private postMessage(data: InterceptedRequest): void {
-			window.postMessage(data, "*");
+			// Используем requestIdleCallback для оптимизации
+			if ("requestIdleCallback" in window) {
+				requestIdleCallback(() => window.postMessage(data, "*"));
+			} else {
+				setTimeout(() => window.postMessage(data, "*"), 0);
+			}
 		}
 
 		private async createMockResponse(mock: Mock): Promise<Response> {
@@ -219,6 +322,7 @@
 
 			const status = mock.statusCode || 200;
 
+			// Минимальная задержка только если указана
 			if (mock.delay && mock.delay > 0) {
 				await new Promise((resolve) => setTimeout(resolve, mock.delay));
 			}
@@ -243,7 +347,6 @@
 				}
 
 				if (BINARY_CONTENT_TYPES.some((type) => contentType.includes(type))) {
-					// Возвращаем валидный JSON для бинарных данных
 					return JSON.stringify({
 						type: "binary",
 						contentType: contentType,
@@ -252,48 +355,17 @@
 				}
 
 				const text = await response.text();
+				if (text.trim() === "") return "{}";
 
-				if (text.trim() === "") {
-					return "{}";
-				}
-
-				// Проверяем, является ли ответ валидным JSON
-				if (contentType.includes("application/json")) {
-					try {
-						const parsed = JSON.parse(text);
-						const stringified = JSON.stringify(parsed);
-						return stringified.length > MAX_RESPONSE_LENGTH
-							? stringified.substring(0, MAX_RESPONSE_LENGTH) + "..."
-							: stringified;
-					} catch {
-						// Если JSON невалидный, оборачиваем текст в JSON объект
-						const escaped = text
-							.replace(/\\/g, "\\\\")
-							.replace(/"/g, '\\"')
-							.replace(/\n/g, "\\n")
-							.replace(/\r/g, "\\r");
-						return JSON.stringify({
-							type: "invalid_json",
-							content: escaped.substring(0, MAX_RESPONSE_LENGTH),
-						});
-					}
-				}
-
-				// Для не-JSON ответов оборачиваем в JSON объект
-				const escaped = text
-					.replace(/\\/g, "\\\\")
-					.replace(/"/g, '\\"')
-					.replace(/\n/g, "\\n")
-					.replace(/\r/g, "\\r");
-				return JSON.stringify({
-					type: "text",
-					content: escaped.substring(0, MAX_RESPONSE_LENGTH),
-				});
+				// Используем безопасную функцию создания JSON
+				return createSafeJsonResponse(
+					text,
+					contentType.includes("application/json") ? "json" : "text",
+				);
 			} catch (error) {
-				console.warn("Error reading response body:", error);
 				return JSON.stringify({
 					type: "error",
-					message: `Error reading response: ${(error as Error).message}`,
+					message: `Error: ${(error as Error).message}`,
 				});
 			}
 		}
@@ -312,15 +384,15 @@
 				} else if (input instanceof URL) {
 					url = input.toString();
 				} else {
-					throw new Error("Unsupported fetch input");
-				}
-
-				const method = init.method || "GET";
-
-				if (!self.shouldInterceptRequest(url)) {
 					return self.originalFetch.apply(this, args);
 				}
 
+				// Быстрая проверка на игнорирование
+				if (shouldIgnoreUrl(url)) {
+					return self.originalFetch.apply(this, args);
+				}
+
+				const method = init.method || "GET";
 				const mock = self.mockManager.findMock(url, method);
 
 				if (mock) {
@@ -341,47 +413,71 @@
 					return response;
 				}
 
-				// Handle real requests
+				// Обработка реальных запросов только если нужно логирование
 				try {
 					const response = await self.originalFetch.apply(this, args);
-					const clonedResponse = response.clone();
 
-					const responseBody = await self.readResponseBody(clonedResponse);
+					// Логируем только API запросы, не статические ресурсы
+					if (self.shouldLogRequest(url)) {
+						const clonedResponse = response.clone();
+						const responseBody = await self.readResponseBody(clonedResponse);
 
-					self.postMessage({
-						type: MESSAGE_TYPES.REQUEST_COMPLETED,
-						url,
-						method,
-						responseBody,
-						statusCode: response.status,
-						isMocked: false,
-						timestamp: Date.now(),
-					});
+						self.postMessage({
+							type: MESSAGE_TYPES.REQUEST_COMPLETED,
+							url,
+							method,
+							responseBody,
+							statusCode: response.status,
+							isMocked: false,
+							timestamp: Date.now(),
+						});
+					}
 
 					return response;
 				} catch (error) {
-					console.error("Fetch interceptor error:", error);
-
-					self.postMessage({
-						type: MESSAGE_TYPES.REQUEST_ERROR,
-						url,
-						method,
-						responseBody: "{}",
-						statusCode: 0,
-						isMocked: false,
-						error: (error as Error).message || "Unknown error",
-						timestamp: Date.now(),
-					});
-
+					if (self.shouldLogRequest(url)) {
+						self.postMessage({
+							type: MESSAGE_TYPES.REQUEST_ERROR,
+							url,
+							method,
+							responseBody: "{}",
+							statusCode: 0,
+							isMocked: false,
+							error: (error as Error).message || "Unknown error",
+							timestamp: Date.now(),
+						});
+					}
 					throw error;
 				}
 			};
 		}
 
+		private shouldLogRequest(url: string): boolean {
+			// Не логируем игнорируемые URL
+			if (shouldIgnoreUrl(url)) {
+				return false;
+			}
+
+			// Логируем все запросы, кроме статических ресурсов
+			const lastDot = url.lastIndexOf(".");
+			if (lastDot > 0) {
+				const extension = url.substring(lastDot).toLowerCase();
+				// Игнорируем только явные статические файлы
+				if (
+					extension.match(
+						/\.(css|js|woff2?|ttf|eot|svg|png|jpe?g|gif|webp|ico)(\?|$)/,
+					)
+				) {
+					return false;
+				}
+			}
+
+			return true;
+		}
+
 		private interceptXHR(): void {
 			const self = this;
 
-			// Создаем новый конструктор XMLHttpRequest
 			function MockedXMLHttpRequest() {
 				const xhr = new self.originalXHR();
 				const originalOpen = xhr.open.bind(xhr);
@@ -407,7 +503,7 @@
 				};
 
 				xhr.send = (body?: any) => {
-					if (!self.shouldInterceptRequest(requestUrl)) {
+					if (shouldIgnoreUrl(requestUrl)) {
 						return originalSend(body);
 					}
 
@@ -418,22 +514,21 @@
 						return;
 					}
 
-					self.handleRealXHR(xhr, requestUrl, requestMethod);
+					if (self.shouldLogRequest(requestUrl)) {
+						self.handleRealXHR(xhr, requestUrl, requestMethod);
+					}
 					return originalSend(body);
 				};
 
-				// Возвращаем модифицированный xhr объект
 				return xhr;
 			}
 
-			// Копируем статические свойства и методы
 			Object.setPrototypeOf(
 				MockedXMLHttpRequest.prototype,
 				this.originalXHR.prototype,
 			);
 			Object.setPrototypeOf(MockedXMLHttpRequest, this.originalXHR);
 
-			// Копируем константы
 			["UNSENT", "OPENED", "HEADERS_RECEIVED", "LOADING", "DONE"].forEach(
 				(prop) => {
 					Object.defineProperty(MockedXMLHttpRequest, prop, {
@@ -445,7 +540,6 @@
 				},
 			);
 
-			// Заменяем глобальный XMLHttpRequest
 			window.XMLHttpRequest = MockedXMLHttpRequest as any;
 		}
 
@@ -457,17 +551,15 @@
 		): void {
 			const delay = mock.delay || DEFAULT_DELAY;
 
-			setTimeout(() => {
+			const executeResponse = () => {
 				let responseBody: string;
 
 				try {
-					if (typeof mock.response === "string") {
-						responseBody = mock.response;
-					} else {
-						responseBody = JSON.stringify(mock.response);
-					}
+					responseBody =
+						typeof mock.response === "string"
+							? mock.response
+							: JSON.stringify(mock.response);
 				} catch (error) {
-					console.warn("Error serializing mock response:", error);
 					responseBody = "{}";
 				}
 
@@ -484,7 +576,6 @@
 					timestamp: Date.now(),
 				});
 
-				// Устанавливаем свойства XHR
 				Object.defineProperty(xhr, "readyState", {
 					value: 4,
 					writable: true,
@@ -511,17 +602,22 @@
 					configurable: true,
 				});
 
-				// Устанавливаем заголовки ответа
 				this.setXHRHeaders(xhr, mock.headers);
 
-				// Вызываем события
 				if (xhr.onreadystatechange) {
 					xhr.onreadystatechange.call(xhr, new Event("readystatechange"));
 				}
 				if (xhr.onload) {
 					xhr.onload.call(xhr, new ProgressEvent("load"));
 				}
-			}, delay);
+			};
+
+			if (delay > 0) {
+				setTimeout(executeResponse, delay);
+			} else {
+				// Используем requestAnimationFrame для лучшей производительности
+				requestAnimationFrame(executeResponse);
+			}
 		}
 
 		private handleRealXHR(
@@ -533,7 +629,7 @@
 			const originalOnReadyStateChange = xhr.onreadystatechange;
 
 			xhr.onreadystatechange = function (this: XMLHttpRequest, ev: Event) {
-				if (xhr.readyState === 4 && self.shouldInterceptRequest(url)) {
+				if (xhr.readyState === 4) {
 					try {
 						const responseBody = self.extractXHRResponseBody(xhr);
 
@@ -547,7 +643,7 @@
 							timestamp: Date.now(),
 						});
 					} catch (error) {
-						console.warn("Error handling real XHR response:", error);
+						// Тихо игнорируем ошибки для лучшей производительности
 					}
 				}
 
@@ -570,10 +666,8 @@
 			}
 
 			xhr.getAllResponseHeaders = () => headersList.join("\r\n");
-
 			xhr.getResponseHeader = (name: string) => {
 				const lowerName = name.toLowerCase();
-
 				if (headers) {
 					for (const [headerName, headerValue] of Object.entries(headers)) {
 						if (headerName.toLowerCase() === lowerName) {
@@ -581,14 +675,12 @@
 						}
 					}
 				}
-
 				return lowerName === "content-type" ? "application/json" : null;
 			};
 		}
 
 		private extractXHRResponseBody(xhr: XMLHttpRequest): string {
 			try {
-				// Если статус указывает на ошибку или пустой ответ, возвращаем пустой JSON
 				if (xhr.status === 204 || xhr.status === 304) {
 					return "{}";
 				}
@@ -597,69 +689,37 @@
 					case "":
 					case "text": {
 						const responseText = xhr.responseText || "";
-
-						// Пытаемся распарсить как JSON, чтобы убедиться что это валидный JSON
 						if (responseText.trim()) {
-							try {
-								JSON.parse(responseText);
-								if (responseText.length > MAX_RESPONSE_LENGTH) {
-									const parsed = JSON.parse(responseText);
-									return (
-										JSON.stringify(parsed).substring(0, MAX_RESPONSE_LENGTH) +
-										"..."
-									);
-								}
-								return responseText;
-							} catch {
-								// Если это не JSON, оборачиваем в JSON объект
-								const escaped = responseText
-									.replace(/\\/g, "\\\\")
-									.replace(/"/g, '\\"')
-									.replace(/\n/g, "\\n")
-									.replace(/\r/g, "\\r");
-								const wrappedResponse = JSON.stringify({
-									text: escaped.substring(0, MAX_RESPONSE_LENGTH),
-								});
-								return wrappedResponse;
-							}
+							return createSafeJsonResponse(responseText);
 						}
 						return "{}";
 					}
 
 					case "json":
-						// Для JSON responseType, xhr.response уже распарсен браузером
 						if (xhr.response === null || xhr.response === undefined) {
 							return "{}";
 						}
 						try {
 							const jsonString = JSON.stringify(xhr.response);
-							if (jsonString.length > MAX_RESPONSE_LENGTH) {
-								return jsonString.substring(0, MAX_RESPONSE_LENGTH) + "...";
-							}
-							return jsonString;
-						} catch (jsonError) {
-							console.warn("Error stringifying JSON response:", jsonError);
+							return jsonString.length > MAX_RESPONSE_LENGTH
+								? jsonString.substring(0, MAX_RESPONSE_LENGTH) + "..."
+								: jsonString;
+						} catch {
 							return "{}";
 						}
 
 					case "document": {
 						const docHtml = xhr.response?.documentElement?.outerHTML || "";
-						const escapedHtml = docHtml
-							.replace(/\\/g, "\\\\")
-							.replace(/"/g, '\\"')
-							.replace(/\n/g, "\\n")
-							.replace(/\r/g, "\\r");
-						return JSON.stringify({
-							type: "document",
-							content: escapedHtml.substring(0, MAX_RESPONSE_LENGTH),
-						});
+						if (docHtml) {
+							return createSafeJsonResponse(docHtml, "document");
+						}
+						return "{}";
 					}
 
 					case "arraybuffer":
 						if (!xhr.response || xhr.response.byteLength === 0) {
 							return "{}";
 						}
-						// Возвращаем валидный JSON объект с информацией о буфере
 						return JSON.stringify({
 							type: "arraybuffer",
 							size: xhr.response.byteLength,
@@ -670,7 +730,6 @@
 						if (!xhr.response) {
 							return "{}";
 						}
-						// Возвращаем валидный JSON объект с информацией о blob
 						return JSON.stringify({
 							type: "blob",
 							size: xhr.response.size,
@@ -681,31 +740,11 @@
 						if (xhr.response === null || xhr.response === undefined) {
 							return "{}";
 						}
-
 						const responseString = String(xhr.response);
-						// Пытаемся распарсить как JSON
-						try {
-							JSON.parse(responseString);
-							if (responseString.length > MAX_RESPONSE_LENGTH) {
-								return responseString.substring(0, MAX_RESPONSE_LENGTH) + "...";
-							}
-							return responseString;
-						} catch {
-							// Если не JSON, оборачиваем в JSON объект
-							const escaped = responseString
-								.replace(/\\/g, "\\\\")
-								.replace(/"/g, '\\"')
-								.replace(/\n/g, "\\n")
-								.replace(/\r/g, "\\r");
-							return JSON.stringify({
-								type: "unknown",
-								content: escaped.substring(0, MAX_RESPONSE_LENGTH),
-							});
-						}
+						return createSafeJsonResponse(responseString, "unknown");
 					}
 				}
-			} catch (error) {
-				console.warn("Error extracting XHR response body:", error);
+			} catch {
 				return "{}";
 			}
 		}
