@@ -1,8 +1,5 @@
 {
 	"manifest_version": 3,
-	"content_security_policy": {
-		"extension_pages": "script-src 'self'; object-src 'self'"
-	},
 	"name": "Mockly",
 	"version": "1.0.0",
 	"description": "Intercept and mock HTTP requests",
@@ -10,10 +7,8 @@
 		"webRequest",
 		"storage",
 		"scripting",
-		"activeTab",
 		"unlimitedStorage",
-		"tabs",
-		"activeTab"
+		"tabs"
 	],
 	"host_permissions": ["<all_urls>"],
 	"background": {
@@ -33,7 +28,8 @@
 			"matches": ["<all_urls>"],
 			"js": ["assets/content.js"],
 			"run_at": "document_start",
-			"all_frames": true
+			"all_frames": true,
+			"world": "ISOLATED"
 		}
 	],
 	"web_accessible_resources": [

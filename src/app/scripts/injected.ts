@@ -239,20 +239,25 @@
 					response.status === 204 ||
 					response.status === 304
 				) {
-					return "";
+					return "{}";
 				}
 
 				if (BINARY_CONTENT_TYPES.some((type) => contentType.includes(type))) {
-					return "[Binary data]";
+					// Возвращаем валидный JSON для бинарных данных
+					return JSON.stringify({
+						type: "binary",
+						contentType: contentType,
+						message: "Binary content not displayed",
+					});
 				}
 
 				const text = await response.text();
 
-				if (text.length <= MAX_RESPONSE_LENGTH) {
-					return text;
+				if (text.trim() === "") {
+					return "{}";
 				}
 
-				// Try to parse and stringify JSON for better formatting
+				// Проверяем, является ли ответ валидным JSON
 				if (contentType.includes("application/json")) {
 					try {
 						const parsed = JSON.parse(text);
@@ -261,14 +266,35 @@
 							? stringified.substring(0, MAX_RESPONSE_LENGTH) + "..."
 							: stringified;
 					} catch {
-						// Fall through to regular truncation
+						// Если JSON невалидный, оборачиваем текст в JSON объект
+						const escaped = text
+							.replace(/\\/g, "\\\\")
+							.replace(/"/g, '\\"')
+							.replace(/\n/g, "\\n")
+							.replace(/\r/g, "\\r");
+						return JSON.stringify({
+							type: "invalid_json",
+							content: escaped.substring(0, MAX_RESPONSE_LENGTH),
+						});
 					}
 				}
 
-				return text.substring(0, MAX_RESPONSE_LENGTH) + "...";
+				// Для не-JSON ответов оборачиваем в JSON объект
+				const escaped = text
+					.replace(/\\/g, "\\\\")
+					.replace(/"/g, '\\"')
+					.replace(/\n/g, "\\n")
+					.replace(/\r/g, "\\r");
+				return JSON.stringify({
+					type: "text",
+					content: escaped.substring(0, MAX_RESPONSE_LENGTH),
+				});
 			} catch (error) {
 				console.warn("Error reading response body:", error);
-				return `[Error reading response: ${(error as Error).message}]`;
+				return JSON.stringify({
+					type: "error",
+					message: `Error reading response: ${(error as Error).message}`,
+				});
 			}
 		}
 
@@ -340,7 +366,7 @@
 						type: MESSAGE_TYPES.REQUEST_ERROR,
 						url,
 						method,
-						responseBody: "",
+						responseBody: "{}",
 						statusCode: 0,
 						isMocked: false,
 						error: (error as Error).message || "Unknown error",
@@ -355,25 +381,36 @@
 		private interceptXHR(): void {
 			const self = this;
 
-			window.XMLHttpRequest = (() => {
+			// Создаем новый конструктор XMLHttpRequest
+			function MockedXMLHttpRequest() {
 				const xhr = new self.originalXHR();
-				const originalOpen = xhr.open;
-				const originalSend = xhr.send;
+				const originalOpen = xhr.open.bind(xhr);
+				const originalSend = xhr.send.bind(xhr);
 
 				let requestUrl = "";
 				let requestMethod = "GET";
 
-				xhr.open = function (
+				xhr.open = (
 					method: string,
 					url: string | URL,
-					...args: any[]
-				) {
+					async?: boolean,
+					user?: string | null,
+					password?: string | null,
+				) => {
 					requestUrl = url.toString();
 					requestMethod = method;
-					return originalOpen.apply(this, [method, url, ...args] as any);
+					if (async !== undefined) {
+						return originalOpen(method, url, async, user, password);
+					} else {
+						return originalOpen(method, url);
+					}
 				};
 
-				xhr.send = function (body?: any) {
+				xhr.send = (body?: any) => {
+					if (!self.shouldInterceptRequest(requestUrl)) {
+						return originalSend(body);
+					}
+
 					const mock = self.mockManager.findMock(requestUrl, requestMethod);
 
 					if (mock) {
@@ -382,18 +419,24 @@
 					}
 
 					self.handleRealXHR(xhr, requestUrl, requestMethod);
-					return originalSend.call(this, body);
+					return originalSend(body);
 				};
 
+				// Возвращаем модифицированный xhr объект
 				return xhr;
-			}) as any;
+			}
 
-			// Copy static properties
-			Object.setPrototypeOf(window.XMLHttpRequest, this.originalXHR);
+			// Копируем статические свойства и методы
+			Object.setPrototypeOf(
+				MockedXMLHttpRequest.prototype,
+				this.originalXHR.prototype,
+			);
+			Object.setPrototypeOf(MockedXMLHttpRequest, this.originalXHR);
 
+			// Копируем константы
 			["UNSENT", "OPENED", "HEADERS_RECEIVED", "LOADING", "DONE"].forEach(
 				(prop) => {
-					Object.defineProperty(window.XMLHttpRequest, prop, {
+					Object.defineProperty(MockedXMLHttpRequest, prop, {
 						value: (this.originalXHR as any)[prop],
 						writable: false,
 						enumerable: true,
@@ -401,6 +444,9 @@
 					});
 				},
 			);
+
+			// Заменяем глобальный XMLHttpRequest
+			window.XMLHttpRequest = MockedXMLHttpRequest as any;
 		}
 
 		private handleMockedXHR(
@@ -412,10 +458,19 @@
 			const delay = mock.delay || DEFAULT_DELAY;
 
 			setTimeout(() => {
-				const responseBody =
-					typeof mock.response === "string"
-						? mock.response
-						: JSON.stringify(mock.response);
+				let responseBody: string;
+
+				try {
+					if (typeof mock.response === "string") {
+						responseBody = mock.response;
+					} else {
+						responseBody = JSON.stringify(mock.response);
+					}
+				} catch (error) {
+					console.warn("Error serializing mock response:", error);
+					responseBody = "{}";
+				}
+
 				const status = mock.statusCode || 200;
 
 				this.postMessage({
@@ -429,19 +484,37 @@
 					timestamp: Date.now(),
 				});
 
-				// Set XHR properties
-				this.setXHRProperties(xhr, {
-					readyState: 4,
-					status,
-					statusText: this.getStatusText(status),
-					responseText: responseBody,
-					response: responseBody,
+				// Устанавливаем свойства XHR
+				Object.defineProperty(xhr, "readyState", {
+					value: 4,
+					writable: true,
+					configurable: true,
+				});
+				Object.defineProperty(xhr, "status", {
+					value: status,
+					writable: true,
+					configurable: true,
+				});
+				Object.defineProperty(xhr, "statusText", {
+					value: this.getStatusText(status),
+					writable: true,
+					configurable: true,
+				});
+				Object.defineProperty(xhr, "responseText", {
+					value: responseBody,
+					writable: true,
+					configurable: true,
+				});
+				Object.defineProperty(xhr, "response", {
+					value: responseBody,
+					writable: true,
+					configurable: true,
 				});
 
-				// Set response headers
+				// Устанавливаем заголовки ответа
 				this.setXHRHeaders(xhr, mock.headers);
 
-				// Trigger events
+				// Вызываем события
 				if (xhr.onreadystatechange) {
 					xhr.onreadystatechange.call(xhr, new Event("readystatechange"));
 				}
@@ -460,33 +533,28 @@
 			const originalOnReadyStateChange = xhr.onreadystatechange;
 
 			xhr.onreadystatechange = function (this: XMLHttpRequest, ev: Event) {
-				if (xhr.readyState === 4) {
-					const responseBody = self.extractXHRResponseBody(xhr);
+				if (xhr.readyState === 4 && self.shouldInterceptRequest(url)) {
+					try {
+						const responseBody = self.extractXHRResponseBody(xhr);
 
-					self.postMessage({
-						type: MESSAGE_TYPES.REQUEST_COMPLETED,
-						url,
-						method,
-						responseBody,
-						statusCode: xhr.status,
-						isMocked: false,
-						timestamp: Date.now(),
-					});
+						self.postMessage({
+							type: MESSAGE_TYPES.REQUEST_COMPLETED,
+							url,
+							method,
+							responseBody,
+							statusCode: xhr.status,
+							isMocked: false,
+							timestamp: Date.now(),
+						});
+					} catch (error) {
+						console.warn("Error handling real XHR response:", error);
+					}
 				}
 
 				if (originalOnReadyStateChange) {
 					originalOnReadyStateChange.call(this, ev);
 				}
 			};
-		}
-
-		private setXHRProperties(
-			xhr: XMLHttpRequest,
-			props: Record<string, any>,
-		): void {
-			Object.entries(props).forEach(([key, value]) => {
-				Object.defineProperty(xhr, key, { value, writable: true });
-			});
 		}
 
 		private setXHRHeaders(
@@ -520,28 +588,125 @@
 
 		private extractXHRResponseBody(xhr: XMLHttpRequest): string {
 			try {
+				// Если статус указывает на ошибку или пустой ответ, возвращаем пустой JSON
+				if (xhr.status === 204 || xhr.status === 304) {
+					return "{}";
+				}
+
 				switch (xhr.responseType) {
 					case "":
-					case "text":
-						return xhr.responseText;
-					case "json":
-						return JSON.stringify(xhr.response);
-					case "document":
-						return xhr.response?.documentElement?.outerHTML || "";
-					case "arraybuffer":
-						try {
-							const decoder = new TextDecoder();
-							return decoder.decode(xhr.response);
-						} catch {
-							return "[Binary data]";
+					case "text": {
+						const responseText = xhr.responseText || "";
+
+						// Пытаемся распарсить как JSON, чтобы убедиться что это валидный JSON
+						if (responseText.trim()) {
+							try {
+								JSON.parse(responseText);
+								if (responseText.length > MAX_RESPONSE_LENGTH) {
+									const parsed = JSON.parse(responseText);
+									return (
+										JSON.stringify(parsed).substring(0, MAX_RESPONSE_LENGTH) +
+										"..."
+									);
+								}
+								return responseText;
+							} catch {
+								// Если это не JSON, оборачиваем в JSON объект
+								const escaped = responseText
+									.replace(/\\/g, "\\\\")
+									.replace(/"/g, '\\"')
+									.replace(/\n/g, "\\n")
+									.replace(/\r/g, "\\r");
+								const wrappedResponse = JSON.stringify({
+									text: escaped.substring(0, MAX_RESPONSE_LENGTH),
+								});
+								return wrappedResponse;
+							}
 						}
+						return "{}";
+					}
+
+					case "json":
+						// Для JSON responseType, xhr.response уже распарсен браузером
+						if (xhr.response === null || xhr.response === undefined) {
+							return "{}";
+						}
+						try {
+							const jsonString = JSON.stringify(xhr.response);
+							if (jsonString.length > MAX_RESPONSE_LENGTH) {
+								return jsonString.substring(0, MAX_RESPONSE_LENGTH) + "...";
+							}
+							return jsonString;
+						} catch (jsonError) {
+							console.warn("Error stringifying JSON response:", jsonError);
+							return "{}";
+						}
+
+					case "document": {
+						const docHtml = xhr.response?.documentElement?.outerHTML || "";
+						const escapedHtml = docHtml
+							.replace(/\\/g, "\\\\")
+							.replace(/"/g, '\\"')
+							.replace(/\n/g, "\\n")
+							.replace(/\r/g, "\\r");
+						return JSON.stringify({
+							type: "document",
+							content: escapedHtml.substring(0, MAX_RESPONSE_LENGTH),
+						});
+					}
+
+					case "arraybuffer":
+						if (!xhr.response || xhr.response.byteLength === 0) {
+							return "{}";
+						}
+						// Возвращаем валидный JSON объект с информацией о буфере
+						return JSON.stringify({
+							type: "arraybuffer",
+							size: xhr.response.byteLength,
+							data: "binary",
+						});
+
 					case "blob":
-						return "[Blob data]";
-					default:
-						return String(xhr.response);
+						if (!xhr.response) {
+							return "{}";
+						}
+						// Возвращаем валидный JSON объект с информацией о blob
+						return JSON.stringify({
+							type: "blob",
+							size: xhr.response.size,
+							mimeType: xhr.response.type || "unknown",
+						});
+
+					default: {
+						if (xhr.response === null || xhr.response === undefined) {
+							return "{}";
+						}
+
+						const responseString = String(xhr.response);
+						// Пытаемся распарсить как JSON
+						try {
+							JSON.parse(responseString);
+							if (responseString.length > MAX_RESPONSE_LENGTH) {
+								return responseString.substring(0, MAX_RESPONSE_LENGTH) + "...";
+							}
+							return responseString;
+						} catch {
+							// Если не JSON, оборачиваем в JSON объект
+							const escaped = responseString
+								.replace(/\\/g, "\\\\")
+								.replace(/"/g, '\\"')
+								.replace(/\n/g, "\\n")
+								.replace(/\r/g, "\\r");
+							return JSON.stringify({
+								type: "unknown",
+								content: escaped.substring(0, MAX_RESPONSE_LENGTH),
+							});
+						}
+					}
 				}
-			} catch {
-				return "";
+			} catch (error) {
+				console.warn("Error extracting XHR response body:", error);
+				return "{}";
 			}
 		}
 	}

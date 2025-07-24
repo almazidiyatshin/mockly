@@ -23,7 +23,7 @@ const MESSAGE_TYPES = {
 const broadcastMessage = async (type: string, payload: any): Promise<void> => {
 	try {
 		await chrome.runtime.sendMessage({ type, payload });
-	} catch (error) {}
+	} catch {}
 
 	const tabs = await chrome.tabs.query({});
 	const sendPromises = tabs
