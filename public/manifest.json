@@ -34,7 +34,7 @@
 	],
 	"web_accessible_resources": [
 		{
-			"resources": ["assets/injected.js"],
+			"resources": ["assets/interceptor.js"],
 			"matches": ["<all_urls>"]
 		}
 	]

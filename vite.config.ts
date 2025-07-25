@@ -51,7 +51,7 @@ const configs = {
       emptyOutDir: false,
       sourcemap: true,
       lib: {
-        entry: resolve(__dirname, 'src/app/scripts/background.ts'),
+        entry: resolve(__dirname, 'src/app/scripts/background/background.ts'),
         name: 'MocklyBackground',
         formats: ['iife'],
         fileName: () => 'background.js',
@@ -74,7 +74,7 @@ const configs = {
       emptyOutDir: false,
       sourcemap: true,
       lib: {
-        entry: resolve(__dirname, 'src/app/scripts/content.ts'),
+        entry: resolve(__dirname, 'src/app/scripts/content/content.ts'),
         name: 'MocklyContent',
         formats: ['iife'],
         fileName: () => 'content.js',
@@ -87,7 +87,7 @@ const configs = {
     },
   }),
 
-  injected: defineConfig({
+  interceptor: defineConfig({
     ...baseConfig,
     define: {
       'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV || 'production'),
@@ -97,10 +97,10 @@ const configs = {
       emptyOutDir: false,
       sourcemap: true,
       lib: {
-        entry: resolve(__dirname, 'src/app/scripts/injected.ts'),
-        name: 'MocklyInjected',
+        entry: resolve(__dirname, 'src/app/scripts/interceptor/interceptor.ts'),
+        name: 'MocklyInterceptor',
         formats: ['iife'],
-        fileName: () => 'injected.js',
+        fileName: () => 'interceptor.js',
       },
       rollupOptions: {
         output: {

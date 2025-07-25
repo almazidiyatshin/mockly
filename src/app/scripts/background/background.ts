@@ -1,4 +1,4 @@
-import { allowedTypes } from "./constants/background";
+import { allowedTypes } from "./constants";
 import {
 	checkAndUpdateDomain,
 	clearTabHistory,

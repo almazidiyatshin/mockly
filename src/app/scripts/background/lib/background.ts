@@ -1,4 +1,4 @@
-import { ignorePatterns } from "../constants/background";
+import { ignorePatterns } from "../constants";
 import { BackgroundState } from "./background-state";
 
 interface Mock {

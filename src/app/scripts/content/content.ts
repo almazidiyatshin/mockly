@@ -1,5 +1,5 @@
+import { MessageType, type MocklyMessage } from "../types";
 import { MockManager } from "./lib/content";
-import { MessageType, type MocklyMessage } from "./types";
 
 const MOCKLY_PREFIX = "Mockly:" as const;
 
