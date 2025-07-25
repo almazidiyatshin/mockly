@@ -54,137 +54,200 @@
 		"application/zip",
 	];
 
-	const MAX_RESPONSE_LENGTH = 500; // Уменьшено для лучшей производительности
-	const DEFAULT_DELAY = 0; // Убираем задержку по умолчанию
+	const MAX_RESPONSE_LENGTH = 500;
+	const DEFAULT_DELAY = 0;
+	const MESSAGE_BATCH_SIZE = 10;
+	const MESSAGE_BATCH_DELAY = 16; // ~60fps
 
-	// Кэш для compiled regex patterns
+	// Предкомпилированные regex для лучшей производительности
+	const STATIC_FILE_REGEX =
+		/\.(css|js|woff2?|ttf|eot|svg|png|jpe?g|gif|webp|ico)(\?|$)/i;
+	const CDN_REGEX =
+		/^https?:\/\/(cdnjs\.cloudflare\.com|unpkg\.com|jsdelivr\.net|fonts\.g(oogle)?apis\.com|fonts\.gstatic\.com)/;
+	const ANALYTICS_REGEX =
+		/(google-analytics|gtm\.js|clarity\.ms|facebook\.com\/tr|doubleclick\.net|yandex\.ru)/;
+
+	// Кэши для оптимизации
 	const COMPILED_PATTERNS = new Map<string, RegExp>();
+	const URL_CACHE = new Map<string, boolean>(); // Кэш для shouldIgnoreUrl
+	const MOCK_CACHE = new Map<string, Mock | null>(); // Кэш для findMock
 
-	// Функция для безопасного экранирования строк в JSON
-	function escapeJsonString(str: string): string {
-		const result = str
-			.replace(/\\/g, "\\\\")
-			.replace(/"/g, '\\"')
-			.replace(/\n/g, "\\n")
-			.replace(/\r/g, "\\r")
-			.replace(/\t/g, "\\t")
-			.replace(/\f/g, "\\f")
-			.replace(/\b/g, "\\b");
+	// Батчинг сообщений для уменьшения overhead
+	let messageBatch: InterceptedRequest[] = [];
+	let batchTimeout: number | null = null;
 
-		// Заменяем управляющие символы без использования regex с управляющими символами
-		let escaped = "";
-		for (let i = 0; i < result.length; i++) {
-			const char = result[i];
-			const code = char.charCodeAt(0);
+	// Пул объектов для переиспользования
+	const requestPool: InterceptedRequest[] = [];
 
-			if ((code >= 0x00 && code <= 0x1f) || (code >= 0x7f && code <= 0x9f)) {
-				escaped += "\\u" + ("0000" + code.toString(16)).slice(-4);
-			} else {
-				escaped += char;
+	function createRequest(): InterceptedRequest {
+		return (
+			requestPool.pop() || {
+				type: "",
+				url: "",
+				method: "",
+				responseBody: "",
+				statusCode: 0,
+				isMocked: false,
+				timestamp: 0,
 			}
-		}
-
-		return escaped;
+		);
 	}
 
-	// Функция для создания валидного JSON ответа
+	function recycleRequest(request: InterceptedRequest): void {
+		if (requestPool.length < 50) {
+			// Ограничиваем размер пула
+			requestPool.push(request);
+		}
+	}
+
+	// Оптимизированная функция для экранирования JSON
+	const JSON_ESCAPE_MAP: Record<string, string> = {
+		'"': '\\"',
+		"\\": "\\\\",
+		"\b": "\\b",
+		"\f": "\\f",
+		"\n": "\\n",
+		"\r": "\\r",
+		"\t": "\\t",
+	};
+
+	function escapeJsonString(str: string): string {
+		// Быстрая проверка - нужно ли экранирование
+		if (!/["\\/\b\f\n\r\t]/.test(str)) {
+			return str;
+		}
+
+		return str.replace(
+			/["\\/\b\f\n\r\t]/g,
+			(match) => JSON_ESCAPE_MAP[match] || match,
+		);
+	}
+
 	function createSafeJsonResponse(
 		content: string,
 		type: string = "text",
 	): string {
-		try {
-			// Сначала пытаемся распарсить как JSON
-			JSON.parse(content);
-			return content; // Если уже валидный JSON, возвращаем как есть
-		} catch {
-			// Если не JSON, оборачиваем в объект
-			const truncated = content.substring(0, MAX_RESPONSE_LENGTH);
-			const escaped = escapeJsonString(truncated);
-			return JSON.stringify({ type, content: escaped });
+		// Быстрая проверка на JSON
+		if (
+			type === "json" ||
+			content.trim().startsWith("{") ||
+			content.trim().startsWith("[")
+		) {
+			try {
+				JSON.parse(content);
+				return content.length > MAX_RESPONSE_LENGTH
+					? content.substring(0, MAX_RESPONSE_LENGTH) + "..."
+					: content;
+			} catch {
+				// Fallback
+			}
 		}
+
+		const truncated = content.substring(0, MAX_RESPONSE_LENGTH);
+		const escaped = escapeJsonString(truncated);
+		return `{"type":"${type}","content":"${escaped}"}`;
 	}
 
-	/**
-	 * Быстрая проверка URL на игнорирование
-	 */
+	// Оптимизированная проверка URL с кэшированием
 	function shouldIgnoreUrl(url: string): boolean {
-		// Быстрая проверка по началу URL
-		if (
+		// Проверяем кэш
+		const cached = URL_CACHE.get(url);
+		if (cached !== undefined) return cached;
+
+		let shouldIgnore = false;
+
+		// Быстрые проверки первыми
+		if (url.length < 10) {
+			shouldIgnore = true;
+		} else if (
 			url.startsWith("chrome-extension:") ||
 			url.startsWith("moz-extension:") ||
 			url.startsWith("about:") ||
 			url.startsWith("data:") ||
 			url.startsWith("blob:")
 		) {
-			return true;
+			shouldIgnore = true;
+		} else if (ANALYTICS_REGEX.test(url)) {
+			shouldIgnore = true;
+		} else if (CDN_REGEX.test(url) && STATIC_FILE_REGEX.test(url)) {
+			shouldIgnore = true;
+		} else if (STATIC_FILE_REGEX.test(url)) {
+			shouldIgnore = true;
 		}
 
-		// Проверяем аналитику и трекеры
-		if (
-			url.includes("google-analytics.com") ||
-			url.includes("gtm.js") ||
-			url.includes("clarity.ms") ||
-			url.includes("facebook.com/tr") ||
-			url.includes("doubleclick.net") ||
-			url.includes("yandex.ru")
-		) {
-			return true;
+		// Кэшируем результат (ограничиваем размер кэша)
+		if (URL_CACHE.size < 1000) {
+			URL_CACHE.set(url, shouldIgnore);
 		}
 
-		// Проверка CDN только для статических ресурсов
-		if (
-			url.includes("cdnjs.cloudflare.com") ||
-			url.includes("unpkg.com") ||
-			url.includes("jsdelivr.net") ||
-			url.includes("fonts.googleapis.com") ||
-			url.includes("fonts.gstatic.com")
-		) {
-			// Проверяем расширение файла
-			const lastDot = url.lastIndexOf(".");
-			if (lastDot > 0) {
-				const extension = url.substring(lastDot).toLowerCase();
-				if (
-					extension.match(
-						/\.(css|js|woff2?|ttf|eot|svg|png|jpe?g|gif|webp|ico)(\?|$)/,
-					)
-				) {
-					return true;
-				}
-			}
+		return shouldIgnore;
+	}
+
+	// Батчинг сообщений для уменьшения нагрузки на main thread
+	function postMessageBatched(data: InterceptedRequest): void {
+		messageBatch.push(data);
+
+		if (messageBatch.length >= MESSAGE_BATCH_SIZE) {
+			flushMessageBatch();
+		} else if (batchTimeout === null) {
+			batchTimeout = window.setTimeout(flushMessageBatch, MESSAGE_BATCH_DELAY);
+		}
+	}
+
+	function flushMessageBatch(): void {
+		if (batchTimeout !== null) {
+			clearTimeout(batchTimeout);
+			batchTimeout = null;
 		}
 
-		return false;
+		if (messageBatch.length === 0) return;
+
+		// Отправляем батч
+		if ("requestIdleCallback" in window) {
+			requestIdleCallback(() => {
+				messageBatch.forEach((msg) => {
+					window.postMessage(msg, "*");
+					recycleRequest(msg);
+				});
+				messageBatch = [];
+			});
+		} else {
+			setTimeout(() => {
+				messageBatch.forEach((msg) => {
+					window.postMessage(msg, "*");
+					recycleRequest(msg);
+				});
+				messageBatch = [];
+			}, 0);
+		}
 	}
 
 	/**
-	 * Оптимизированный класс для управления моками
+	 * Ультра-оптимизированный MockManager
 	 */
 	class MockManager {
 		private mocks: Mock[] = [];
-		private mocksByMethod = new Map<string, Mock[]>();
-		private exactUrlMocks = new Map<string, Mock>();
+		private exactUrlMap = new Map<string, Mock>();
+		private patternMocks: Mock[] = [];
 
 		updateMocks(mocks: Mock[]): void {
 			this.mocks = mocks.filter((mock) => mock.enabled !== false);
 			this.rebuildIndexes();
+			MOCK_CACHE.clear(); // Очищаем кэш при обновлении моков
 		}
 
 		private rebuildIndexes(): void {
-			this.mocksByMethod.clear();
-			this.exactUrlMocks.clear();
+			this.exactUrlMap.clear();
+			this.patternMocks = [];
 
 			for (const mock of this.mocks) {
-				const method = (mock.method || "GET").toLowerCase();
-
-				if (!this.mocksByMethod.has(method)) {
-					this.mocksByMethod.set(method, []);
-				}
-				this.mocksByMethod.get(method)!.push(mock);
-
-				// Индексируем точные URL для быстрого поиска
-				if (mock.url && !mock.urlPattern) {
-					const key = `${method}:${this.normalizeUrl(mock.url)}`;
-					this.exactUrlMocks.set(key, mock);
+				if (mock.urlPattern) {
+					this.patternMocks.push(mock);
+				} else if (mock.url) {
+					const method = (mock.method || "GET").toLowerCase();
+					const normalizedUrl = this.normalizeUrl(mock.url);
+					const key = `${method}:${normalizedUrl}`;
+					this.exactUrlMap.set(key, mock);
 				}
 			}
 		}
@@ -192,84 +255,66 @@
 		findMock(url: string, method: string = "GET"): Mock | null {
 			if (this.mocks.length === 0) return null;
 
+			// Проверяем кэш
+			const cacheKey = `${method.toLowerCase()}:${url}`;
+			const cached = MOCK_CACHE.get(cacheKey);
+			if (cached !== undefined) return cached;
+
 			const normalizedMethod = method.toLowerCase();
 			const normalizedUrl = this.normalizeUrl(url);
 
-			// Быстрый поиск по точному URL
+			// Точный поиск по URL
 			const exactKey = `${normalizedMethod}:${normalizedUrl}`;
-			const exactMock = this.exactUrlMocks.get(exactKey);
-			if (exactMock) return exactMock;
-
-			// Поиск среди моков для данного метода
-			const methodMocks = this.mocksByMethod.get(normalizedMethod) || [];
-			const requestPath = this.getPathFromUrl(url);
-
-			for (const mock of methodMocks) {
-				if (this.isUrlMatch(mock, normalizedUrl, requestPath)) {
-					return mock;
-				}
+			const exactMock = this.exactUrlMap.get(exactKey);
+			if (exactMock) {
+				this.cacheMock(cacheKey, exactMock);
+				return exactMock;
 			}
 
-			return null;
-		}
+			// Поиск по паттернам
+			for (const mock of this.patternMocks) {
+				if (mock.method && mock.method.toLowerCase() !== normalizedMethod)
+					continue;
+				if (!mock.urlPattern) continue;
 
-		private normalizeUrl(inputUrl: string): string {
-			if (inputUrl.startsWith("/")) {
-				return window.location.origin + inputUrl;
-			}
-			return inputUrl;
-		}
-
-		private getPathFromUrl(inputUrl: string): string {
-			try {
-				const urlObj = new URL(inputUrl, window.location.origin);
-				return urlObj.pathname + urlObj.search;
-			} catch {
-				return inputUrl;
-			}
-		}
-
-		private isUrlMatch(
-			mock: Mock,
-			normalizedUrl: string,
-			requestPath: string,
-		): boolean {
-			if (mock.url) {
-				const normalizedMockUrl = this.normalizeUrl(mock.url);
-				if (normalizedUrl === normalizedMockUrl) return true;
-
-				const [urlBase] = normalizedUrl.split("?");
-				const [mockBase] = normalizedMockUrl.split("?");
-				if (urlBase === mockBase) return true;
-
-				const mockPath = this.getPathFromUrl(mock.url);
-				if (requestPath === mockPath) return true;
-
-				const [pathBase] = requestPath.split("?");
-				const [mockPathBase] = mockPath.split("?");
-				if (pathBase === mockPathBase) return true;
-			}
-
-			if (mock.urlPattern) {
 				let regex = COMPILED_PATTERNS.get(mock.urlPattern);
 				if (!regex) {
 					try {
 						regex = new RegExp(mock.urlPattern);
-						COMPILED_PATTERNS.set(mock.urlPattern, regex);
+						if (COMPILED_PATTERNS.size < 100) {
+							COMPILED_PATTERNS.set(mock.urlPattern, regex);
+						}
 					} catch {
-						console.warn("Invalid regex pattern:", mock.urlPattern);
-						return false;
+						continue;
 					}
 				}
-				return regex.test(normalizedUrl);
+
+				if (regex.test(normalizedUrl)) {
+					this.cacheMock(cacheKey, mock);
+					return mock;
+				}
 			}
 
-			return false;
+			this.cacheMock(cacheKey, null);
+			return null;
+		}
+
+		private cacheMock(key: string, mock: Mock | null): void {
+			if (MOCK_CACHE.size < 500) {
+				// Ограничиваем размер кэша
+				MOCK_CACHE.set(key, mock);
+			}
+		}
+
+		private normalizeUrl(inputUrl: string): string {
+			return inputUrl.startsWith("/")
+				? window.location.origin + inputUrl
+				: inputUrl;
 		}
 	}
 
 	/**
-	 * Оптимизированный класс для перехвата HTTP запросов
+	 * Максимально оптимизированный RequestInterceptor
 	 */
 	class RequestInterceptor {
 		private mockManager = new MockManager();
@@ -280,39 +325,53 @@
 			this.setupMessageListener();
 			this.interceptFetch();
 			this.interceptXHR();
+
+			// Периодическая очистка кэшей для предотвращения утечек памяти
+			setInterval(() => this.cleanupCaches(), 300000); // каждые 5 минут
+		}
+
+		private cleanupCaches(): void {
+			if (URL_CACHE.size > 500) {
+				URL_CACHE.clear();
+			}
+			if (MOCK_CACHE.size > 300) {
+				MOCK_CACHE.clear();
+			}
 		}
 
 		private setupMessageListener(): void {
 			window.addEventListener("message", (event) => {
 				if (event.source !== window) return;
-
 				if (event.data.type === MESSAGE_TYPES.MOCKS_UPDATE) {
-					const mocks = event.data.mocks || [];
-					this.mockManager.updateMocks(mocks);
+					this.mockManager.updateMocks(event.data.mocks || []);
 				}
 			});
+		}
+
+		private shouldLogRequest(url: string): boolean {
+			return !shouldIgnoreUrl(url);
 		}
 
 		private getStatusText(status: number): string {
 			return STATUS_TEXTS[status] || "Unknown";
 		}
 
-		private postMessage(data: InterceptedRequest): void {
-			// Используем requestIdleCallback для оптимизации
-			if ("requestIdleCallback" in window) {
-				requestIdleCallback(() => window.postMessage(data, "*"));
-			} else {
-				setTimeout(() => window.postMessage(data, "*"), 0);
-			}
+		private createResponse(
+			data: Partial<InterceptedRequest>,
+		): InterceptedRequest {
+			const request = createRequest();
+			Object.assign(request, data);
+			request.timestamp = Date.now();
+			return request;
 		}
 
 		private async createMockResponse(mock: Mock): Promise<Response> {
 			const headers = new Headers({ "Content-Type": "application/json" });
 
 			if (mock.headers) {
-				Object.entries(mock.headers).forEach(([name, value]) => {
+				for (const [name, value] of Object.entries(mock.headers)) {
 					headers.set(name, value);
-				});
+				}
 			}
 
 			const responseBody =
@@ -322,7 +381,6 @@
 
 			const status = mock.statusCode || 200;
 
-			// Минимальная задержка только если указана
 			if (mock.delay && mock.delay > 0) {
 				await new Promise((resolve) => setTimeout(resolve, mock.delay));
 			}
@@ -335,8 +393,6 @@
 		}
 
 		private async readResponseBody(response: Response): Promise<string> {
-			const contentType = response.headers.get("content-type") || "";
-
 			try {
 				if (
 					!response.body ||
@@ -346,27 +402,21 @@
 					return "{}";
 				}
 
+				const contentType = response.headers.get("content-type") || "";
+
 				if (BINARY_CONTENT_TYPES.some((type) => contentType.includes(type))) {
-					return JSON.stringify({
-						type: "binary",
-						contentType: contentType,
-						message: "Binary content not displayed",
-					});
+					return `{"type":"binary","contentType":"${contentType}","message":"Binary content"}`;
 				}
 
 				const text = await response.text();
-				if (text.trim() === "") return "{}";
+				if (!text.trim()) return "{}";
 
-				// Используем безопасную функцию создания JSON
 				return createSafeJsonResponse(
 					text,
 					contentType.includes("application/json") ? "json" : "text",
 				);
 			} catch (error) {
-				return JSON.stringify({
-					type: "error",
-					message: `Error: ${(error as Error).message}`,
-				});
+				return `{"type":"error","message":"${(error as Error).message}"}`;
 			}
 		}
 
@@ -387,7 +437,6 @@
 					return self.originalFetch.apply(this, args);
 				}
 
-				// Быстрая проверка на игнорирование
 				if (shouldIgnoreUrl(url)) {
 					return self.originalFetch.apply(this, args);
 				}
@@ -399,7 +448,7 @@
 					const response = await self.createMockResponse(mock);
 					const responseBody = await response.clone().text();
 
-					self.postMessage({
+					const request = self.createResponse({
 						type: MESSAGE_TYPES.REQUEST_INTERCEPTED,
 						url,
 						method,
@@ -407,36 +456,35 @@
 						responseBody,
 						statusCode: response.status,
 						isMocked: true,
-						timestamp: Date.now(),
 					});
 
+					postMessageBatched(request);
 					return response;
 				}
 
-				// Обработка реальных запросов только если нужно логирование
 				try {
 					const response = await self.originalFetch.apply(this, args);
 
-					// Логируем только API запросы, не статические ресурсы
 					if (self.shouldLogRequest(url)) {
 						const clonedResponse = response.clone();
 						const responseBody = await self.readResponseBody(clonedResponse);
 
-						self.postMessage({
+						const request = self.createResponse({
 							type: MESSAGE_TYPES.REQUEST_COMPLETED,
 							url,
 							method,
 							responseBody,
 							statusCode: response.status,
 							isMocked: false,
-							timestamp: Date.now(),
 						});
+
+						postMessageBatched(request);
 					}
 
 					return response;
 				} catch (error) {
 					if (self.shouldLogRequest(url)) {
-						self.postMessage({
+						const request = self.createResponse({
 							type: MESSAGE_TYPES.REQUEST_ERROR,
 							url,
 							method,
@@ -444,35 +492,13 @@
 							statusCode: 0,
 							isMocked: false,
 							error: (error as Error).message || "Unknown error",
-							timestamp: Date.now(),
 						});
+
+						postMessageBatched(request);
 					}
 					throw error;
 				}
 			};
-		}
-
-		private shouldLogRequest(url: string): boolean {
-			// Не логируем игнорируемые URL
-			if (shouldIgnoreUrl(url)) {
-				return false;
-			}
-
-			// Логируем все запросы, кроме статических ресурсов
-			const lastDot = url.lastIndexOf(".");
-			if (lastDot > 0) {
-				const extension = url.substring(lastDot).toLowerCase();
-				// Игнорируем только явные статические файлы
-				if (
-					extension.match(
-						/\.(css|js|woff2?|ttf|eot|svg|png|jpe?g|gif|webp|ico)(\?|$)/,
-					)
-				) {
-					return false;
-				}
-			}
-
-			return true;
 		}
 
 		private interceptXHR(): void {
@@ -523,22 +549,28 @@
 				return xhr;
 			}
 
+			// Копируем прототип и статические свойства
 			Object.setPrototypeOf(
 				MockedXMLHttpRequest.prototype,
 				this.originalXHR.prototype,
 			);
 			Object.setPrototypeOf(MockedXMLHttpRequest, this.originalXHR);
 
-			["UNSENT", "OPENED", "HEADERS_RECEIVED", "LOADING", "DONE"].forEach(
-				(prop) => {
-					Object.defineProperty(MockedXMLHttpRequest, prop, {
-						value: (this.originalXHR as any)[prop],
-						writable: false,
-						enumerable: true,
-						configurable: false,
-					});
-				},
-			);
+			const constants = [
+				"UNSENT",
+				"OPENED",
+				"HEADERS_RECEIVED",
+				"LOADING",
+				"DONE",
+			];
+			for (const prop of constants) {
+				Object.defineProperty(MockedXMLHttpRequest, prop, {
+					value: (this.originalXHR as any)[prop],
+					writable: false,
+					enumerable: true,
+					configurable: false,
+				});
+			}
 
 			window.XMLHttpRequest = MockedXMLHttpRequest as any;
 		}
@@ -549,23 +581,15 @@
 			url: string,
 			method: string,
 		): void {
-			const delay = mock.delay || DEFAULT_DELAY;
-
 			const executeResponse = () => {
-				let responseBody: string;
-
-				try {
-					responseBody =
-						typeof mock.response === "string"
-							? mock.response
-							: JSON.stringify(mock.response);
-				} catch (error) {
-					responseBody = "{}";
-				}
+				const responseBody =
+					typeof mock.response === "string"
+						? mock.response
+						: JSON.stringify(mock.response);
 
 				const status = mock.statusCode || 200;
 
-				this.postMessage({
+				const request = this.createResponse({
 					type: MESSAGE_TYPES.REQUEST_INTERCEPTED,
 					url,
 					method,
@@ -573,49 +597,38 @@
 					responseBody,
 					statusCode: status,
 					isMocked: true,
-					timestamp: Date.now(),
 				});
 
-				Object.defineProperty(xhr, "readyState", {
-					value: 4,
-					writable: true,
-					configurable: true,
-				});
-				Object.defineProperty(xhr, "status", {
-					value: status,
-					writable: true,
-					configurable: true,
-				});
-				Object.defineProperty(xhr, "statusText", {
-					value: this.getStatusText(status),
-					writable: true,
-					configurable: true,
-				});
-				Object.defineProperty(xhr, "responseText", {
-					value: responseBody,
-					writable: true,
-					configurable: true,
-				});
-				Object.defineProperty(xhr, "response", {
-					value: responseBody,
-					writable: true,
-					configurable: true,
-				});
+				postMessageBatched(request);
+
+				// Устанавливаем свойства XHR
+				const properties = {
+					readyState: 4,
+					status,
+					statusText: this.getStatusText(status),
+					responseText: responseBody,
+					response: responseBody,
+				};
+
+				for (const [key, value] of Object.entries(properties)) {
+					Object.defineProperty(xhr, key, {
+						value,
+						writable: true,
+						configurable: true,
+					});
+				}
 
 				this.setXHRHeaders(xhr, mock.headers);
 
-				if (xhr.onreadystatechange) {
-					xhr.onreadystatechange.call(xhr, new Event("readystatechange"));
-				}
-				if (xhr.onload) {
-					xhr.onload.call(xhr, new ProgressEvent("load"));
-				}
+				// Вызываем события
+				xhr.onreadystatechange?.(new Event("readystatechange"));
+				xhr.onload?.(new ProgressEvent("load"));
 			};
 
+			const delay = mock.delay || DEFAULT_DELAY;
 			if (delay > 0) {
 				setTimeout(executeResponse, delay);
 			} else {
-				// Используем requestAnimationFrame для лучшей производительности
 				requestAnimationFrame(executeResponse);
 			}
 		}
@@ -625,7 +638,6 @@
 			url: string,
 			method: string,
 		): void {
-			const self = this;
 			const originalOnReadyStateChange = xhr.onreadystatechange;
 
 			xhr.onreadystatechange = function (this: XMLHttpRequest, ev: Event) {
@@ -633,17 +645,18 @@
 					try {
 						const responseBody = self.extractXHRResponseBody(xhr);
 
-						self.postMessage({
+						const request = self.createResponse({
 							type: MESSAGE_TYPES.REQUEST_COMPLETED,
 							url,
 							method,
 							responseBody,
 							statusCode: xhr.status,
 							isMocked: false,
-							timestamp: Date.now(),
 						});
-					} catch (error) {
-						// Тихо игнорируем ошибки для лучшей производительности
+
+						postMessageBatched(request);
+					} catch {
+						// Игнорируем ошибки для производительности
 					}
 				}
 
@@ -651,6 +664,8 @@
 					originalOnReadyStateChange.call(this, ev);
 				}
 			};
+
+			const self = this;
 		}
 
 		private setXHRHeaders(
@@ -660,9 +675,9 @@
 			const headersList = ["content-type: application/json"];
 
 			if (headers) {
-				Object.entries(headers).forEach(([name, value]) => {
+				for (const [name, value] of Object.entries(headers)) {
 					headersList.push(`${name.toLowerCase()}: ${value}`);
-				});
+				}
 			}
 
 			xhr.getAllResponseHeaders = () => headersList.join("\r\n");
@@ -689,16 +704,13 @@
 					case "":
 					case "text": {
 						const responseText = xhr.responseText || "";
-						if (responseText.trim()) {
-							return createSafeJsonResponse(responseText);
-						}
-						return "{}";
+						return responseText.trim()
+							? createSafeJsonResponse(responseText)
+							: "{}";
 					}
 
 					case "json":
-						if (xhr.response === null || xhr.response === undefined) {
-							return "{}";
-						}
+						if (xhr.response == null) return "{}";
 						try {
 							const jsonString = JSON.stringify(xhr.response);
 							return jsonString.length > MAX_RESPONSE_LENGTH
@@ -710,39 +722,24 @@
 
 					case "document": {
 						const docHtml = xhr.response?.documentElement?.outerHTML || "";
-						if (docHtml) {
-							return createSafeJsonResponse(docHtml, "document");
-						}
-						return "{}";
+						return docHtml ? createSafeJsonResponse(docHtml, "document") : "{}";
 					}
 
 					case "arraybuffer":
-						if (!xhr.response || xhr.response.byteLength === 0) {
-							return "{}";
-						}
-						return JSON.stringify({
-							type: "arraybuffer",
-							size: xhr.response.byteLength,
-							data: "binary",
-						});
+						return xhr.response?.byteLength
+							? `{"type":"arraybuffer","size":${xhr.response.byteLength},"data":"binary"}`
+							: "{}";
 
 					case "blob":
-						if (!xhr.response) {
-							return "{}";
-						}
-						return JSON.stringify({
-							type: "blob",
-							size: xhr.response.size,
-							mimeType: xhr.response.type || "unknown",
-						});
+						return xhr.response
+							? `{"type":"blob","size":${xhr.response.size},"mimeType":"${
+									xhr.response.type || "unknown"
+								}"}`
+							: "{}";
 
-					default: {
-						if (xhr.response === null || xhr.response === undefined) {
-							return "{}";
-						}
-						const responseString = String(xhr.response);
-						return createSafeJsonResponse(responseString, "unknown");
-					}
+					default:
+						if (xhr.response == null) return "{}";
+						return createSafeJsonResponse(String(xhr.response), "unknown");
 				}
 			} catch {
 				return "{}";
