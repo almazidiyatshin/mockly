@@ -1,3 +1,4 @@
+export * from "./badge";
 export * from "./button";
 export * from "./empty-block";
 export * from "./form";

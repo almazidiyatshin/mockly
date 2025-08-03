@@ -1,7 +1,12 @@
-import { Braces } from "lucide-react";
 import { Link } from "react-router-dom";
-import { cn } from "@/shared/lib";
-import { Button, EmptyBlock, Loader, PageLayout, Table } from "@/shared/ui";
+import {
+	Badge,
+	Button,
+	EmptyBlock,
+	Loader,
+	PageLayout,
+	Table,
+} from "@/shared/ui";
 import {
 	TableBody,
 	TableCell,
@@ -24,53 +29,44 @@ const LogsPage = () => {
 				<Table>
 					<TableHeader>
 						<TableRow>
-							<TableHead>Status</TableHead>
-							<TableHead>Method</TableHead>
-							<TableHead>Url</TableHead>
-							<TableHead></TableHead>
-							<TableHead></TableHead>
+							<TableHead className="w-[10%]">Request</TableHead>
+							<TableHead className="w-[80%]">Url</TableHead>
+							<TableHead className="w-[10%]" />
 						</TableRow>
 					</TableHeader>
 					<TableBody>
 						{history.map((log) => (
-							<TableRow key={log.statusCode}>
-								<TableCell
-									className={cn(
-										"font-medium",
-										log.isMocked &&
-											(log.statusCode < 400 ? "text-teal-600" : "text-red-600"),
-									)}
-								>
-									{log.statusCode}
+							<TableRow
+								key={log.statusCode}
+								className={log.isMocked ? "bg-teal-50" : ""}
+							>
+								<TableCell>
+									<div className="flex flex-wrap gap-1">
+										<Badge className="h-4" variant="outline">
+											{log.method}
+										</Badge>
+										<Badge className="h-4" variant="outline">
+											{log.statusCode}
+										</Badge>
+									</div>
 								</TableCell>
-								<TableCell
-									className={cn(
-										log.isMocked &&
-											(log.statusCode < 400 ? "text-teal-600" : "text-red-600"),
-									)}
-								>
-									{log.method}
+
+								<TableCell className="max-w-60" title={log.url}>
+									<div
+										className="text-sm leading-5"
+										style={{
+											display: "-webkit-box",
+											WebkitLineClamp: 2,
+											WebkitBoxOrient: "vertical",
+											overflow: "hidden",
+											wordBreak: "break-all",
+											maxHeight: "3rem",
+										}}
+									>
+										{log.url}
+									</div>
 								</TableCell>
-								<TableCell
-									title={log.url}
-									className={cn(
-										"truncate overflow-hidden whitespace-nowrap max-w-xs",
-										log.isMocked &&
-											(log.statusCode < 400 ? "text-teal-600" : "text-red-600"),
-									)}
-								>
-									{log.url}
-								</TableCell>
-								<TableCell className="text-">
-									{log.isMocked && (
-										<Braces
-											size={20}
-											className={
-												log.statusCode < 400 ? "text-teal-600" : "text-red-600"
-											}
-										/>
-									)}
-								</TableCell>
+
 								<TableCell className="text-right">
 									{log.isMocked ? (
 										<Button
@@ -79,7 +75,7 @@ const LogsPage = () => {
 											className="p-2"
 											disabled
 										>
-											Mock
+											Mocked
 										</Button>
 									) : (
 										<Button asChild variant="outline" size="sm" className="p-2">

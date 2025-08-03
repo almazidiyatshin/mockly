@@ -6,7 +6,6 @@ export const useMocks = () => {
 	const [isLoading, setIsLoading] = useState(true);
 
 	useEffect(() => {
-		// Получаем начальный список
 		if (
 			typeof chrome !== "undefined" &&
 			chrome.runtime &&
@@ -17,7 +16,6 @@ export const useMocks = () => {
 				setIsLoading(false);
 			});
 
-			// Слушаем обновления
 			const handleMessage = (message: any) => {
 				if (message.type === "MOCKS_UPDATED") {
 					setMocks(message.payload);
@@ -43,7 +41,6 @@ export const useMocks = () => {
 						payload: mock,
 					},
 					(response) => {
-						// Дополнительно уведомляем активные табы (для Manifest V3)
 						if (response?.success) {
 							notifyActiveTabsAboutMocks();
 						}
@@ -62,7 +59,6 @@ export const useMocks = () => {
 					payload: { id },
 				},
 				(response) => {
-					// Дополнительно уведомляем активные табы (для Manifest V3)
 					if (response?.success) {
 						notifyActiveTabsAboutMocks();
 					}
@@ -72,7 +68,6 @@ export const useMocks = () => {
 		});
 	};
 
-	// Функция для уведомления активных табов о изменениях моков
 	const notifyActiveTabsAboutMocks = () => {
 		if (chrome.tabs) {
 			chrome.tabs.query({}, (tabs) => {
@@ -83,14 +78,13 @@ export const useMocks = () => {
 								type: "MOCKS_UPDATED",
 								payload: mocks,
 							})
-							.catch(() => {}); // Игнорируем ошибки для неактивных табов
+							.catch(() => {});
 					}
 				});
 			});
 		}
 	};
 
-	// Дополнительная функция для обновления конкретного мока
 	const updateMock = (id: string, updatedMock: any) => {
 		return new Promise((resolve) => {
 			chrome.runtime.sendMessage(
@@ -108,7 +102,6 @@ export const useMocks = () => {
 		});
 	};
 
-	// Функция для включения/выключения мока
 	const toggleMock = (id: string, enabled: boolean) => {
 		return new Promise((resolve) => {
 			chrome.runtime.sendMessage(
@@ -126,7 +119,6 @@ export const useMocks = () => {
 		});
 	};
 
-	// Функция для очистки всех моков
 	const clearAllMocks = () => {
 		return new Promise((resolve) => {
 			chrome.runtime.sendMessage(

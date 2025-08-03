@@ -1,5 +1,6 @@
 import { Pencil, Trash2 } from "lucide-react";
 import {
+	Badge,
 	Button,
 	EmptyBlock,
 	Loader,
@@ -11,6 +12,9 @@ import {
 	TableHead,
 	TableHeader,
 	TableRow,
+	Tooltip,
+	TooltipContent,
+	TooltipTrigger,
 } from "@/shared/ui";
 import { useModel } from "./useModel";
 
@@ -33,17 +37,17 @@ const MainPage = () => {
 				<Table>
 					<TableHeader>
 						<TableRow>
-							<TableHead>Active</TableHead>
-							<TableHead>Name</TableHead>
-							<TableHead>Method</TableHead>
-							<TableHead>Url</TableHead>
-							<TableHead />
+							<TableHead className="w-[8%]">Active</TableHead>
+							<TableHead className="w-[10%]">Request</TableHead>
+							<TableHead className="w-[16%]">Name</TableHead>
+							<TableHead className="w-[56%]">Url</TableHead>
+							<TableHead className="w-[10%]" />
 						</TableRow>
 					</TableHeader>
 					<TableBody>
 						{mocks.map((mock) => (
 							<TableRow key={mock.name}>
-								<TableCell className="flex items-center">
+								<TableCell>
 									<Switch
 										className="data-[state=checked]:bg-teal-600"
 										checked={mock.enabled}
@@ -51,36 +55,83 @@ const MainPage = () => {
 									/>
 								</TableCell>
 
-								<TableCell className="truncate overflow-hidden whitespace-nowrap max-w-16">
-									{mock.name}
+								<TableCell>
+									<div className="flex flex-wrap gap-1">
+										<Badge className="h-4" variant="outline">
+											{mock.method}
+										</Badge>
+										<Badge className="h-4" variant="outline">
+											{mock.statusCode}
+										</Badge>
+									</div>
 								</TableCell>
 
-								<TableCell>{mock.method}</TableCell>
-
-								<TableCell
-									title={mock.url}
-									className="truncate overflow-hidden whitespace-nowrap max-w-36"
-								>
-									{mock.url}
+								<TableCell className="max-w-16" title={mock.name}>
+									<div
+										className="text-sm leading-5"
+										style={{
+											display: "-webkit-box",
+											WebkitLineClamp: 2,
+											WebkitBoxOrient: "vertical",
+											overflow: "hidden",
+											wordBreak: "break-all",
+											maxHeight: "3rem",
+										}}
+									>
+										{mock.name}
+									</div>
 								</TableCell>
 
-								<TableCell className="flex justify-end gap-2">
-									<Button
-										variant="outline"
-										size="icon"
-										className="size-6"
-										onClick={handleEditClick(mock)}
+								<TableCell className="max-w-60" title={mock.url}>
+									<div
+										className="text-sm leading-5"
+										style={{
+											display: "-webkit-box",
+											WebkitLineClamp: 2,
+											WebkitBoxOrient: "vertical",
+											overflow: "hidden",
+											wordBreak: "break-all",
+											maxHeight: "3rem",
+										}}
 									>
-										<Pencil />
-									</Button>
-									<Button
-										variant="destructive"
-										size="icon"
-										className="size-6"
-										onClick={handleDelete(mock.id)}
-									>
-										<Trash2 />
-									</Button>
+										{mock.url}
+									</div>
+								</TableCell>
+
+								<TableCell>
+									<div className="flex gap-2 justify-end">
+										<Tooltip>
+											<TooltipTrigger asChild>
+												<Button
+													variant="outline"
+													size="icon"
+													className="size-6"
+													onClick={handleEditClick(mock)}
+												>
+													<Pencil />
+												</Button>
+											</TooltipTrigger>
+											<TooltipContent>
+												<p>Edit mock</p>
+											</TooltipContent>
+										</Tooltip>
+
+										<Tooltip>
+											<TooltipTrigger asChild>
+												<Button
+													variant="destructive"
+													size="icon"
+													className="size-6"
+													onClick={handleDelete(mock.id)}
+												>
+													<Trash2 />
+												</Button>
+											</TooltipTrigger>
+											<TooltipContent>
+												<p>Delete mock</p>
+											</TooltipContent>
+										</Tooltip>
+									</div>
 								</TableCell>
 							</TableRow>
 						))}
